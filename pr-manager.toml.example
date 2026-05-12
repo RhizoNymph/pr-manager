@@ -1,0 +1,33 @@
+# pr-manager multi-repo configuration.
+#
+# Tokens are NEVER stored in this file. Each repo names an env var via
+# `token_env` (defaulting to GITHUB_TOKEN); pr-manager reads the actual token
+# from that env var at startup.
+#
+# Run with:
+#   cargo run --release -- --config pr-manager.toml
+# or set PR_MANAGER_CONFIG=pr-manager.toml in the environment.
+
+[defaults]
+# Any of these may be overridden per-repo.
+poll_interval_seconds = 60
+recent_merges_limit = 10
+log_level = "info"
+agent = "claude"             # or "codex"
+agent_auth = "oauth"         # or "api"
+claude_extra_args = "--permission-mode bypassPermissions"
+# token_env = "GITHUB_TOKEN" # default; per-repo `token_env` overrides this
+# cache_root = "/abs/path"   # defaults to $XDG_CACHE_HOME or ~/.cache
+
+[[repos]]
+github_repo = "acme/widgets"
+repo_path = "/home/me/code/acme/widgets"
+# Per-repo overrides (any [defaults] key works here):
+# token_env = "GITHUB_TOKEN_ACME"
+# agent = "codex"
+# poll_interval_seconds = 30
+
+[[repos]]
+github_repo = "acme/sprockets"
+repo_path = "/home/me/code/acme/sprockets"
+token_env = "GITHUB_TOKEN_SPROCKETS"

@@ -1,0 +1,348 @@
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
+use std::time::Duration;
+
+use tokio::sync::Notify;
+use tokio::task::JoinHandle;
+
+use crate::agent::AgentRunner;
+use crate::git::fetch_origin_prune;
+use crate::github::GitHubClient;
+use crate::merger::{try_native_merge, MergeOutcome, NeedsAgentReason};
+use crate::prompt::build_prompt;
+use crate::types::{GitHubError, OpenAutoMergePr, PrEvent, RepoConfig};
+
+const SEEN_CAP: usize = 200;
+
+/// One independent polling loop per watched repo. They share the AgentRunner
+/// (registry is keyed by repo+pr) and a single cancel Notify.
+pub struct PollerSet {
+    handles: Vec<JoinHandle<()>>,
+    cancel: Arc<Notify>,
+}
+
+impl PollerSet {
+    /// Signal every loop to exit and join them. Each loop wakes from its sleep
+    /// or its inner select, runs no further ticks, and the JoinHandles resolve.
+    pub async fn cancel(self) {
+        self.cancel.notify_waiters();
+        for h in self.handles {
+            if let Err(err) = h.await {
+                tracing::warn!(err = %err, "poller task join failed");
+            }
+        }
+    }
+}
+
+pub fn start_pollers(
+    repos: Vec<Arc<RepoConfig>>,
+    clients: Vec<Arc<GitHubClient>>,
+    runner: Arc<AgentRunner>,
+) -> PollerSet {
+    assert_eq!(
+        repos.len(),
+        clients.len(),
+        "start_pollers requires one client per repo"
+    );
+
+    let cancel = Arc::new(Notify::new());
+    let mut handles = Vec::with_capacity(repos.len());
+
+    for (repo, client) in repos.into_iter().zip(clients) {
+        let runner = runner.clone();
+        let cancel_loop = cancel.clone();
+        let handle = tokio::spawn(async move {
+            run_repo_loop(repo, client, runner, cancel_loop).await;
+        });
+        handles.push(handle);
+    }
+
+    PollerSet { handles, cancel }
+}
+
+async fn run_repo_loop(
+    repo: Arc<RepoConfig>,
+    client: Arc<GitHubClient>,
+    runner: Arc<AgentRunner>,
+    cancel: Arc<Notify>,
+) {
+    let mut last_main_sha: Option<String> = None;
+    let mut seen_queue: VecDeque<String> = VecDeque::new();
+    let mut seen_set: HashSet<String> = HashSet::new();
+
+    let interval = Duration::from_secs(repo.poll_interval_seconds);
+
+    // First tick fires immediately; subsequent ticks are interval-paced.
+    loop {
+        if let Err(err) = tick(
+            &repo,
+            client.as_ref(),
+            runner.as_ref(),
+            &mut last_main_sha,
+            &mut seen_queue,
+            &mut seen_set,
+        )
+        .await
+        {
+            // tick() catches and logs every recoverable failure itself; an
+            // Err here is reserved for unhandled-panic-style cases that
+            // bubble up from the inner futures.
+            tracing::error!(repo = %repo.github_repo, err = %err, "unhandled poller error");
+        }
+
+        tokio::select! {
+            _ = cancel.notified() => {
+                break;
+            }
+            _ = tokio::time::sleep(interval) => {}
+        }
+    }
+}
+
+async fn tick(
+    repo: &RepoConfig,
+    github: &GitHubClient,
+    runner: &AgentRunner,
+    last_main_sha: &mut Option<String>,
+    seen_queue: &mut VecDeque<String>,
+    seen_set: &mut HashSet<String>,
+) -> anyhow::Result<()> {
+    let (main_sha, main_branch) = match github.get_default_branch_sha().await {
+        Ok(v) => v,
+        Err(err) => {
+            log_warn(repo, &err, "failed to fetch default-branch SHA");
+            return Ok(());
+        }
+    };
+
+    // Always list open PRs — we need them both for new-event emission AND
+    // for reconciling the active session registry against current state.
+    let prs = match github.list_open_auto_merge_prs().await {
+        Ok(v) => v,
+        Err(err) => {
+            log_warn(repo, &err, "failed to list open auto-merge PRs");
+            return Ok(());
+        }
+    };
+
+    let mut by_number: HashMap<i64, OpenAutoMergePr> = HashMap::new();
+    for pr in &prs {
+        by_number.insert(pr.number, pr.clone());
+    }
+
+    reconcile_sessions(repo, runner, &by_number).await;
+
+    if last_main_sha.is_none() {
+        tracing::info!(
+            repo = %repo.github_repo,
+            main_sha = %main_sha,
+            main_branch = %main_branch,
+            "initialized; not emitting on first tick"
+        );
+        *last_main_sha = Some(main_sha);
+        return Ok(());
+    }
+
+    let prev = last_main_sha.as_deref().unwrap_or_default();
+    if prev == main_sha {
+        tracing::debug!(repo = %repo.github_repo, main_sha = %main_sha, "main unchanged");
+        return Ok(());
+    }
+
+    tracing::info!(
+        repo = %repo.github_repo,
+        from = %prev,
+        to = %main_sha,
+        main_branch = %main_branch,
+        "main advanced; checking auto-merge PRs"
+    );
+
+    let recent = if !prs.is_empty() {
+        match github.list_recently_merged(repo.recent_merges_limit).await {
+            Ok(v) => v,
+            Err(err) => {
+                log_warn(repo, &err, "failed to list recently merged PRs; continuing");
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
+    // Single fetch in the user's repo before any agent runs. Agents share the
+    // same `.git` via worktrees, so concurrent `git fetch` from each agent
+    // would race on `.git/objects` and packed-refs locks. If fetch fails we
+    // skip this tick's spawns and retry next tick (last_main_sha stays put).
+    if !prs.is_empty() {
+        if let Err(err) = fetch_origin_prune(&repo.repo_path).await {
+            tracing::warn!(
+                repo = %repo.github_repo,
+                err = %err,
+                repo_path = %repo.repo_path.display(),
+                "git fetch origin --prune failed; deferring spawns to next tick"
+            );
+            return Ok(());
+        }
+    }
+
+    for pr in &prs {
+        if pr.head_repo_id != pr.base_repo_id {
+            tracing::info!(repo = %repo.github_repo, pr = pr.number, "skipped fork PR (out of scope for v1)");
+            continue;
+        }
+        let key = format!("{}:{}:{}", pr.number, pr.head_sha, main_sha);
+        if seen_set.contains(&key) {
+            tracing::debug!(repo = %repo.github_repo, key = %key, "already emitted; skipping");
+            continue;
+        }
+
+        // Try the native fast path first: clean merges and lockfile-only
+        // conflicts get pushed without paying for an agent. The merger always
+        // cleans up its worktree before returning, so the agent (if needed)
+        // starts from the same fresh state it always has.
+        match try_native_merge(repo, pr).await {
+            MergeOutcome::Pushed => {
+                remember(seen_queue, seen_set, key);
+                tracing::info!(
+                    repo = %repo.github_repo,
+                    pr = pr.number,
+                    head_sha = %pr.head_sha,
+                    main_sha = %main_sha,
+                    "merged and pushed natively (no conflicts)"
+                );
+                continue;
+            }
+            MergeOutcome::PushedAfterLockfile { lockfiles } => {
+                remember(seen_queue, seen_set, key);
+                tracing::info!(
+                    repo = %repo.github_repo,
+                    pr = pr.number,
+                    head_sha = %pr.head_sha,
+                    main_sha = %main_sha,
+                    lockfiles = %lockfiles.join(","),
+                    "merged and pushed natively (lockfile-only conflicts)"
+                );
+                continue;
+            }
+            MergeOutcome::NeedsAgent { reason } => {
+                log_needs_agent(repo, pr.number, &reason);
+            }
+        }
+
+        let event = PrEvent {
+            pr: pr.clone(),
+            main_sha: main_sha.clone(),
+            recent: recent.clone(),
+        };
+        let prompt = build_prompt(repo, &event);
+
+        match runner.spawn(repo, &event, &prompt).await {
+            Ok(()) => {
+                remember(seen_queue, seen_set, key);
+                tracing::info!(
+                    repo = %repo.github_repo,
+                    pr = pr.number,
+                    head_sha = %pr.head_sha,
+                    main_sha = %main_sha,
+                    "emitted event"
+                );
+            }
+            Err(err) => {
+                tracing::error!(repo = %repo.github_repo, err = %err, "failed to emit event");
+            }
+        }
+    }
+
+    *last_main_sha = Some(main_sha);
+    Ok(())
+}
+
+async fn reconcile_sessions(
+    repo: &RepoConfig,
+    runner: &AgentRunner,
+    by_number: &HashMap<i64, OpenAutoMergePr>,
+) {
+    // 1. Drop entries for sessions whose tmux session is gone (agent exited
+    //    on its own — typically a successful push). Sweep is global so each
+    //    repo's loop redundantly nudges it; harmless and cheap.
+    runner.sweep().await;
+
+    // 2. Force-close sessions whose target PR has moved on. Two signals:
+    //    - PR no longer in the open auto-merge list.
+    //    - PR head_sha advanced past the SHA we spawned against.
+    for sess in runner.active_for_repo(&repo.repo_id).await {
+        let current = by_number.get(&sess.pr_number);
+        match current {
+            None => {
+                runner
+                    .close(
+                        &repo.repo_id,
+                        sess.pr_number,
+                        "pr no longer open with auto-merge",
+                    )
+                    .await;
+            }
+            Some(current) if current.head_sha != sess.spawn_head_sha => {
+                let from = sess.spawn_head_sha.chars().take(7).collect::<String>();
+                let to = current.head_sha.chars().take(7).collect::<String>();
+                let reason = format!("head_sha advanced {from} → {to}");
+                runner.close(&repo.repo_id, sess.pr_number, &reason).await;
+            }
+            Some(_) => {}
+        }
+    }
+}
+
+fn remember(queue: &mut VecDeque<String>, set: &mut HashSet<String>, key: String) {
+    if set.contains(&key) {
+        return;
+    }
+    set.insert(key.clone());
+    queue.push_back(key);
+    while queue.len() > SEEN_CAP {
+        if let Some(old) = queue.pop_front() {
+            set.remove(&old);
+        }
+    }
+}
+
+fn log_needs_agent(repo: &RepoConfig, pr_number: i64, reason: &NeedsAgentReason) {
+    match reason {
+        NeedsAgentReason::SemanticConflicts { files } => {
+            tracing::info!(
+                repo = %repo.github_repo,
+                pr = pr_number,
+                conflicts = %files.join(","),
+                "native merge handing off to agent: semantic conflicts"
+            );
+        }
+        NeedsAgentReason::LockfileResolverFailed { lockfile, detail } => {
+            tracing::warn!(
+                repo = %repo.github_repo,
+                pr = pr_number,
+                lockfile = %lockfile,
+                detail = %detail,
+                "native merge handing off to agent: lockfile resolver failed"
+            );
+        }
+        NeedsAgentReason::Other(detail) => {
+            tracing::warn!(
+                repo = %repo.github_repo,
+                pr = pr_number,
+                detail = %detail,
+                "native merge handing off to agent: other failure"
+            );
+        }
+    }
+}
+
+fn log_warn(repo: &RepoConfig, err: &GitHubError, msg: &str) {
+    tracing::warn!(
+        repo = %repo.github_repo,
+        err = %err.message,
+        kind = "GitHubError",
+        status = err.status.map(|s| s as u64),
+        endpoint = %err.endpoint,
+        "{msg}"
+    );
+}
