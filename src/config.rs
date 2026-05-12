@@ -29,7 +29,9 @@ pub fn load_config_from(argv: &[String]) -> Result<Config, ConfigError> {
 /// Resolution order:
 ///   1. `--config <path>` (or `--config=<path>`) on the command line.
 ///   2. `PR_MANAGER_CONFIG` env var.
-///   3. `./pr-manager.toml` in the current directory.
+///   3. `$XDG_CONFIG_HOME/pr-manager/config.toml`
+///      (or `~/.config/pr-manager/config.toml` when XDG_CONFIG_HOME is unset).
+///   4. `./pr-manager.toml` in the current directory.
 fn resolve_config_path(cli_arg: Option<String>) -> Result<PathBuf, ConfigError> {
     if let Some(p) = cli_arg.filter(|v| !v.is_empty()) {
         return Ok(PathBuf::from(p));
@@ -39,16 +41,33 @@ fn resolve_config_path(cli_arg: Option<String>) -> Result<PathBuf, ConfigError> 
             return Ok(PathBuf::from(p));
         }
     }
+    if let Some(p) = xdg_config_path() {
+        if p.exists() {
+            return Ok(p);
+        }
+    }
     let cwd_default = PathBuf::from(DEFAULT_CONFIG_FILENAME);
     if cwd_default.exists() {
         return Ok(cwd_default);
     }
+    let xdg_hint = xdg_config_path()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "$XDG_CONFIG_HOME/pr-manager/config.toml".to_string());
     Err(ConfigError::new(
         "no config file",
         vec![format!(
-            "no config file found; pass --config <path>, set PR_MANAGER_CONFIG=<path>, or place {DEFAULT_CONFIG_FILENAME} in the current directory"
+            "no config file found; pass --config <path>, set PR_MANAGER_CONFIG=<path>, place a config at {xdg_hint}, or place {DEFAULT_CONFIG_FILENAME} in the current directory"
         )],
     ))
+}
+
+fn xdg_config_path() -> Option<PathBuf> {
+    if let Ok(p) = env::var("XDG_CONFIG_HOME") {
+        if !p.is_empty() {
+            return Some(absolutize(&p).join("pr-manager").join("config.toml"));
+        }
+    }
+    dirs::config_dir().map(|d| d.join("pr-manager").join("config.toml"))
 }
 
 // --- TOML schema -------------------------------------------------------------

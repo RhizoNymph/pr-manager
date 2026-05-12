@@ -77,7 +77,9 @@ Overview:
     config: >
       Hand-rolled validated TOML loader. Resolves the config file in
       this order: --config <path> flag, PR_MANAGER_CONFIG env var,
-      ./pr-manager.toml in cwd; errors if none exist. Parses [defaults]
+      $XDG_CONFIG_HOME/pr-manager/config.toml (or ~/.config/pr-manager/
+      config.toml when XDG_CONFIG_HOME is unset), ./pr-manager.toml in
+      cwd; errors if none exist. Parses [defaults]
       (any of poll_interval_seconds, recent_merges_limit, log_level,
       agent, agent_bin, agent_args, agent_auth, claude_bin,
       claude_extra_args, codex_bin, codex_extra_args, token_env,

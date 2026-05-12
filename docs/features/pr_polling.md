@@ -42,10 +42,13 @@
 
 A single TOML config file declares `[defaults]` and one or more `[[repos]]`
 entries. Resolution order: `--config <path>` flag, `PR_MANAGER_CONFIG`
-env var, `./pr-manager.toml` in the current directory; the loader errors
-if none of those exist. Tokens are NOT in the file — `token_env`
-(per-repo or default) names an env var read at startup, and `.env` is
-loaded via dotenv before tokens are resolved. The simplest valid file
+env var, `$XDG_CONFIG_HOME/pr-manager/config.toml`
+(or `~/.config/pr-manager/config.toml` when `XDG_CONFIG_HOME` is unset),
+`./pr-manager.toml` in the current directory; the loader errors if none
+of those exist. Tokens are NOT in the file — `token_env` (per-repo or
+default) names an env var read at startup. `.env` in the working directory
+is loaded via dotenv if present, but is optional: variables exported in the
+process environment work just as well. The simplest valid file
 is one repo:
 
 ```toml

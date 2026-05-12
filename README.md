@@ -166,9 +166,16 @@ pr-manager reads a TOML file. Resolution order:
 
 1. `--config <path>` flag.
 2. `PR_MANAGER_CONFIG=<path>` env var.
-3. `./pr-manager.toml` in the current directory.
+3. `$XDG_CONFIG_HOME/pr-manager/config.toml` (or `~/.config/pr-manager/config.toml` when `XDG_CONFIG_HOME` is unset).
+4. `./pr-manager.toml` in the current directory.
 
 If none of those exist the process exits with a config error.
+
+Tokens (`GITHUB_TOKEN` or whatever `token_env` names) are read directly from
+the process environment. A `.env` file in the working directory is loaded if
+present, but is optional — exporting the variables in your shell, a systemd
+unit's `Environment=`, or any other mechanism that puts them in the
+environment before pr-manager starts works equally well.
 
 ```toml
 [defaults]
@@ -227,6 +234,10 @@ profile needs different execution policy.
 - `cargo run --release` — uses `./pr-manager.toml`
 - `cargo run --release -- --config /path/to/file.toml` — explicit config path
 - `cargo build --release` — build the standalone binary at `target/release/pr-manager`
+- `cargo install --path .` — install the binary to `~/.cargo/bin/pr-manager`.
+  With a config at `~/.config/pr-manager/config.toml` and `GITHUB_TOKEN`
+  exported in your environment, you can then run `pr-manager` from anywhere
+  with no flags and no `.env`.
 
 ## Running as a systemd service
 
