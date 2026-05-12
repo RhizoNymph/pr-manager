@@ -181,6 +181,10 @@ agent_auth = "oauth"         # or "api"
 claude_extra_args = "--permission-mode bypassPermissions"
 # token_env = "GITHUB_TOKEN" # default; per-repo `token_env` overrides
 # cache_root = "/abs/path"   # defaults to $XDG_CACHE_HOME or ~/.cache
+# pr_authors = ["alice", "renovate[bot]"]
+#   Restrict to PRs from these author logins (case-insensitive). Unset or
+#   [] = process every open auto-merge PR. Lets two operators run
+#   pr-manager against the same repo without stepping on each other.
 
 [[repos]]
 github_repo = "owner/repo1"
@@ -188,6 +192,7 @@ repo_path = "/abs/path/1"
 # any [defaults] key may be overridden here, e.g.:
 # token_env = "GITHUB_TOKEN_REPO1"
 # agent = "codex"
+# pr_authors = ["alice"]   # replaces (not merges with) the default list
 
 [[repos]]
 github_repo = "owner/repo2"
@@ -197,8 +202,9 @@ repo_path = "/abs/path/2"
 `[defaults]` keys: `poll_interval_seconds`, `recent_merges_limit`, `log_level`,
 `agent`, `agent_bin`, `agent_args`, `agent_auth`, `claude_bin`,
 `claude_extra_args`, `codex_bin`, `codex_extra_args`, `token_env`,
-`cache_root`. `log_level` and `cache_root` are process-wide; everything else
-can be overridden per-repo.
+`cache_root`, `pr_authors`. `log_level` and `cache_root` are process-wide;
+everything else can be overridden per-repo (`pr_authors` replaces, rather
+than merges with, the default list).
 
 `[[repos]]` requires `github_repo` (`owner/name`) and `repo_path` (absolute
 path to a local checkout). Any `[defaults]` key except `log_level` and

@@ -93,6 +93,9 @@ user's terminal
 Per-repo poller loop (every `poll_interval_seconds`, default 60s):
 1. `GET /repos/{repo}/commits/{default_branch}` -> `mainSha`.
 2. `GET /repos/{repo}/pulls?state=open` -> filter `auto_merge != null`.
+   If `repo.pr_authors` is non-empty, drop PRs whose `user.login` is not in
+   the allowlist (case-insensitive). Unknown author (missing `user`) is
+   dropped when the allowlist is active. Empty/unset allowlist = no filter.
 3. Reconcile sessions:
    - `runner.sweep()` removes registry entries (across all repos) whose
      tmux session no longer exists.

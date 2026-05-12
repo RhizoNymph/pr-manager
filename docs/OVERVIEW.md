@@ -17,7 +17,9 @@ Overview:
     poller: >
       Interval-driven GitHub poller, one tokio task per repo. Each tick
       (per repo) fetches the default-branch SHA, lists open auto-merge
-      PRs, reconciles its own active tmux sessions against current PR
+      PRs, optionally filters them by the per-repo `pr_authors` allowlist
+      (so two operators can split the same repo without stepping on each
+      other), reconciles its own active tmux sessions against current PR
       state, and for each new (pr_number, head_sha, main_sha) triple
       invokes the merger fast-path; only PRs the merger hands back fall
       through to an agent session. Each loop dedupes events by

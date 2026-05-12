@@ -41,6 +41,11 @@ struct PrBase {
 }
 
 #[derive(Debug, Deserialize)]
+struct PrUser {
+    login: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct PrListItem {
     number: i64,
     title: String,
@@ -48,6 +53,8 @@ struct PrListItem {
     auto_merge: Option<serde_json::Value>,
     #[serde(default)]
     merged_at: Option<String>,
+    #[serde(default)]
+    user: Option<PrUser>,
     head: PrHead,
     base: PrBase,
 }
@@ -173,6 +180,7 @@ impl GitHubClient {
                     head_repo_id: head_repo.id,
                     base_repo_id: p.base.repo.id,
                     base_branch: p.base.ref_,
+                    author_login: p.user.map(|u| u.login),
                 });
             }
 

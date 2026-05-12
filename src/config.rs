@@ -79,6 +79,8 @@ struct TomlDefaults {
     token_env: Option<String>,
     /// Override the cache root (defaults to $XDG_CACHE_HOME or ~/.cache).
     cache_root: Option<String>,
+    /// Default PR-author allowlist. See `pr_authors` on TomlRepo.
+    pr_authors: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -98,6 +100,11 @@ struct TomlRepo {
     claude_extra_args: Option<String>,
     codex_bin: Option<String>,
     codex_extra_args: Option<String>,
+    /// Allowlist of PR author logins. When set and non-empty, pr-manager only
+    /// processes PRs whose author appears here (case-insensitive). Unset or
+    /// empty means "no filter" — every open auto-merge PR is handled. Per-repo
+    /// value replaces (not merges with) the default.
+    pr_authors: Option<Vec<String>>,
 }
 
 // --- Loader ------------------------------------------------------------------
@@ -245,6 +252,13 @@ fn load_toml(path: &Path) -> Result<Config, ConfigError> {
 
         let agent = build_agent_config(&agent_inputs, agent_kind, &worktree_base);
 
+        let pr_authors = resolve_pr_authors(
+            raw_repo.pr_authors.as_deref(),
+            parsed.defaults.pr_authors.as_deref(),
+            &issue_prefix,
+            &mut issues,
+        );
+
         repos.push(RepoConfig {
             repo_id,
             github_repo: raw_repo.github_repo.clone(),
@@ -258,6 +272,7 @@ fn load_toml(path: &Path) -> Result<Config, ConfigError> {
             repo_path,
             agent,
             auth_mode,
+            pr_authors,
         });
     }
 
@@ -303,6 +318,25 @@ fn parse_agent_name(value: Option<&str>, prefix: &str, issues: &mut Vec<String>)
             AgentName::Claude
         }
     }
+}
+
+fn resolve_pr_authors(
+    repo_value: Option<&[String]>,
+    default_value: Option<&[String]>,
+    prefix: &str,
+    issues: &mut Vec<String>,
+) -> Vec<String> {
+    let source = repo_value.or(default_value).unwrap_or(&[]);
+    let mut out = Vec::with_capacity(source.len());
+    for entry in source {
+        let trimmed = entry.trim();
+        if trimmed.is_empty() {
+            issues.push(format!("{prefix} pr_authors contains an empty entry"));
+            continue;
+        }
+        out.push(trimmed.to_ascii_lowercase());
+    }
+    out
 }
 
 fn parse_auth_mode(value: Option<&str>, prefix: &str, issues: &mut Vec<String>) -> AuthMode {

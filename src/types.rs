@@ -135,6 +135,12 @@ pub struct RepoConfig {
     pub repo_path: PathBuf,
     pub agent: AgentConfig,
     pub auth_mode: AuthMode,
+    /// Lowercased allowlist of PR author logins. Empty means "no filter,
+    /// process every open auto-merge PR." Non-empty means "only process PRs
+    /// whose author.login (case-insensitive) matches an entry." Lets two
+    /// operators run pr-manager against the same repo without stepping on
+    /// each other's PRs.
+    pub pr_authors: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -156,6 +162,10 @@ pub struct OpenAutoMergePr {
     pub head_repo_id: i64,
     pub base_repo_id: i64,
     pub base_branch: String,
+    /// GitHub login of the PR author, when the API returned it. Used by
+    /// per-repo author allowlists; `None` is treated as "unknown author" and
+    /// is filtered out when an allowlist is configured.
+    pub author_login: Option<String>,
 }
 
 #[derive(Debug, Clone)]

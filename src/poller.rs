@@ -125,6 +125,8 @@ async fn tick(
         }
     };
 
+    let prs = filter_by_authors(repo, prs);
+
     let mut by_number: HashMap<i64, OpenAutoMergePr> = HashMap::new();
     for pr in &prs {
         by_number.insert(pr.number, pr.clone());
@@ -306,6 +308,35 @@ fn remember(queue: &mut VecDeque<String>, set: &mut HashSet<String>, key: String
     }
 }
 
+fn filter_by_authors(repo: &RepoConfig, prs: Vec<OpenAutoMergePr>) -> Vec<OpenAutoMergePr> {
+    if repo.pr_authors.is_empty() {
+        return prs;
+    }
+    let mut kept = Vec::with_capacity(prs.len());
+    for pr in prs {
+        let matched = pr
+            .author_login
+            .as_deref()
+            .map(|login| {
+                repo.pr_authors
+                    .iter()
+                    .any(|allowed| allowed.eq_ignore_ascii_case(login))
+            })
+            .unwrap_or(false);
+        if matched {
+            kept.push(pr);
+        } else {
+            tracing::debug!(
+                repo = %repo.github_repo,
+                pr = pr.number,
+                author = pr.author_login.as_deref().unwrap_or("<unknown>"),
+                "skipping pr: author not in pr_authors allowlist"
+            );
+        }
+    }
+    kept
+}
+
 fn log_needs_agent(repo: &RepoConfig, pr_number: i64, reason: &NeedsAgentReason) {
     match reason {
         NeedsAgentReason::SemanticConflicts { files } => {
@@ -345,4 +376,73 @@ fn log_warn(repo: &RepoConfig, err: &GitHubError, msg: &str) {
         endpoint = %err.endpoint,
         "{msg}"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{AgentConfig, AgentName, AuthMode, RepoId};
+    use std::path::PathBuf;
+
+    fn repo_with_authors(authors: Vec<&str>) -> RepoConfig {
+        RepoConfig {
+            repo_id: RepoId::new("acme", "widgets"),
+            github_repo: "acme/widgets".into(),
+            github_owner: "acme".into(),
+            github_name: "widgets".into(),
+            github_token: "t".into(),
+            poll_interval_seconds: 60,
+            recent_merges_limit: 10,
+            worktree_base: PathBuf::from("/tmp/pr-manager/acme__widgets/wt"),
+            logs_base: PathBuf::from("/tmp/pr-manager/acme__widgets/logs"),
+            repo_path: PathBuf::from("/tmp/acme/widgets"),
+            agent: AgentConfig {
+                name: AgentName::Claude,
+                bin: "claude".into(),
+                args: vec!["-p".into()],
+            },
+            auth_mode: AuthMode::OAuth,
+            pr_authors: authors.into_iter().map(|s| s.to_ascii_lowercase()).collect(),
+        }
+    }
+
+    fn pr_with_author(number: i64, author: Option<&str>) -> OpenAutoMergePr {
+        OpenAutoMergePr {
+            number,
+            title: format!("PR #{number}"),
+            body: String::new(),
+            head_branch: "feature".into(),
+            head_sha: "deadbeef".into(),
+            head_repo_id: 1,
+            base_repo_id: 1,
+            base_branch: "main".into(),
+            author_login: author.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn filter_passes_everything_when_allowlist_empty() {
+        let repo = repo_with_authors(vec![]);
+        let prs = vec![
+            pr_with_author(1, Some("alice")),
+            pr_with_author(2, Some("bob")),
+            pr_with_author(3, None),
+        ];
+        let kept = filter_by_authors(&repo, prs);
+        assert_eq!(kept.len(), 3);
+    }
+
+    #[test]
+    fn filter_keeps_only_allowlisted_authors_case_insensitively() {
+        let repo = repo_with_authors(vec!["Alice", "renovate[bot]"]);
+        let prs = vec![
+            pr_with_author(1, Some("alice")),
+            pr_with_author(2, Some("Bob")),
+            pr_with_author(3, Some("RENOVATE[bot]")),
+            pr_with_author(4, None),
+        ];
+        let kept = filter_by_authors(&repo, prs);
+        let kept_nums: Vec<i64> = kept.iter().map(|p| p.number).collect();
+        assert_eq!(kept_nums, vec![1, 3]);
+    }
 }

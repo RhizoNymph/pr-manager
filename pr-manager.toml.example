@@ -18,6 +18,11 @@ agent_auth = "oauth"         # or "api"
 claude_extra_args = "--permission-mode bypassPermissions"
 # token_env = "GITHUB_TOKEN" # default; per-repo `token_env` overrides this
 # cache_root = "/abs/path"   # defaults to $XDG_CACHE_HOME or ~/.cache
+# pr_authors = ["alice", "renovate[bot]"]
+#   Restrict pr-manager to PRs from these author logins (case-insensitive).
+#   Lets two operators run pr-manager against the same repo without stepping
+#   on each other. Unset or [] = process every open auto-merge PR.
+#   Per-repo `pr_authors` replaces (not merges with) the default list.
 
 [[repos]]
 github_repo = "acme/widgets"
@@ -26,6 +31,7 @@ repo_path = "/home/me/code/acme/widgets"
 # token_env = "GITHUB_TOKEN_ACME"
 # agent = "codex"
 # poll_interval_seconds = 30
+# pr_authors = ["alice"]
 
 [[repos]]
 github_repo = "acme/sprockets"
