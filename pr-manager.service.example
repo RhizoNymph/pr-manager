@@ -45,7 +45,7 @@ WorkingDirectory=%h
 # ---------------------------------------------------------------------------
 
 # systemd user services start with a sparse PATH. Extend it so the agent
-# CLI, tmux, and the lockfile resolvers (npm/pnpm/yarn/cargo/poetry) are
+# CLI, tmux, and the lockfile resolvers (npm/pnpm/yarn/cargo/poetry/uv) are
 # visible to the spawned shell. Add anything else you need (e.g. nvm,
 # pyenv, rustup shims).
 Environment=PATH=%h/.local/bin:%h/.cargo/bin:%h/.nvm/versions/node/current/bin:/usr/local/bin:/usr/bin:/bin

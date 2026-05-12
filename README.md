@@ -123,7 +123,7 @@ For each watched repo, a dedicated task ticks every `poll_interval_seconds`
    fast-path: a per-PR detached worktree runs `git merge origin/<base>` and,
    on success, pushes `HEAD` to `origin/<head_branch>`. If conflicts are
    limited to known lockfiles (`package-lock.json`, `pnpm-lock.yaml`,
-   `yarn.lock`, `Cargo.lock`, `poetry.lock`), each is deleted and regenerated
+   `yarn.lock`, `Cargo.lock`, `poetry.lock`, `uv.lock`), each is deleted and regenerated
    via the matching package manager, then committed and pushed. The triple is
    recorded as seen and no agent runs.
 6. If the merger reports `NeedsAgent` (semantic conflicts, missing/failed

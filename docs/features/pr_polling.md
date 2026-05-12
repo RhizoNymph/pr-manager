@@ -141,6 +141,7 @@ For each `(pr, head_sha, main_sha)` triple, given a `&RepoConfig`:
      | `yarn.lock`         | `yarn install --mode update-lockfile` (Yarn v3+)        |
      | `Cargo.lock`        | `cargo generate-lockfile`                               |
      | `poetry.lock`       | `poetry lock`                                           |
+     | `uv.lock`           | `uv lock`                                               |
      If any resolver exits non-zero or the file is not produced: abort,
      remove the worktree, return
      `NeedsAgent { LockfileResolverFailed { lockfile, detail } }`.

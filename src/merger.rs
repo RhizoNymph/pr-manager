@@ -53,6 +53,7 @@ enum Lockfile {
     YarnLock,
     CargoLock,
     PoetryLock,
+    UvLock,
 }
 
 impl Lockfile {
@@ -64,6 +65,7 @@ impl Lockfile {
             "yarn.lock" => Some(Self::YarnLock),
             "Cargo.lock" => Some(Self::CargoLock),
             "poetry.lock" => Some(Self::PoetryLock),
+            "uv.lock" => Some(Self::UvLock),
             _ => None,
         }
     }
@@ -81,6 +83,7 @@ impl Lockfile {
             Self::YarnLock => ("yarn", &["install", "--mode", "update-lockfile"]),
             Self::CargoLock => ("cargo", &["generate-lockfile"]),
             Self::PoetryLock => ("poetry", &["lock"]),
+            Self::UvLock => ("uv", &["lock"]),
         }
     }
 
@@ -92,6 +95,7 @@ impl Lockfile {
             Self::YarnLock => "yarn.lock",
             Self::CargoLock => "Cargo.lock",
             Self::PoetryLock => "poetry.lock",
+            Self::UvLock => "uv.lock",
         }
     }
 }
@@ -508,6 +512,10 @@ mod tests {
             Lockfile::detect("backend/poetry.lock"),
             Some(Lockfile::PoetryLock)
         ));
+        assert!(matches!(
+            Lockfile::detect("services/api/uv.lock"),
+            Some(Lockfile::UvLock)
+        ));
     }
 
     #[test]
@@ -555,6 +563,7 @@ mod tests {
             Lockfile::YarnLock,
             Lockfile::CargoLock,
             Lockfile::PoetryLock,
+            Lockfile::UvLock,
         ] {
             assert_eq!(
                 Lockfile::detect(k.as_str()).map(|d| d.as_str()),

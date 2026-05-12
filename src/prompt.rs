@@ -31,7 +31,7 @@ not obvious.\n\
 pr-manager already attempted a non-LLM fast path before invoking you:\n\
   1. clean `git merge` (would have skipped you if it succeeded)\n\
   2. lockfile-only conflict resolution by regenerating package-lock.json,\n\
-     pnpm-lock.yaml, yarn.lock, Cargo.lock, or poetry.lock from the merged\n\
+     pnpm-lock.yaml, yarn.lock, Cargo.lock, poetry.lock, or uv.lock from the merged\n\
      manifest (would also have skipped you on success)\n\
 You were spawned because at least one conflict is not a recognized lockfile,\n\
 or a lockfile resolver was unavailable / failed. Expect a real semantic\n\
@@ -93,7 +93,7 @@ If git merge reports conflicts, decide whether the resolution is OBVIOUS:\n\
   OBVIOUS = the conflict is textual / structural with no semantic\n\
   ambiguity. Examples:\n\
     * lockfiles (package-lock.json, pnpm-lock.yaml, Cargo.lock,\n\
-      poetry.lock) — regenerate, or take the version that matches the\n\
+      poetry.lock, uv.lock) — regenerate, or take the version that matches the\n\
       merged package manifest.\n\
     * Both branches added imports / use statements in the same block.\n\
     * Both branches added entries to the same list, table, enum, or\n\

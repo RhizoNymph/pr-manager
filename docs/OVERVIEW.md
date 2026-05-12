@@ -29,10 +29,11 @@ Overview:
       repo's worktreeBase, runs `git merge origin/<base> --no-edit`, and
       on success pushes HEAD to origin/<head_branch>. On conflicts: if
       every conflicted file is a recognized lockfile (package-lock.json,
-      pnpm-lock.yaml, yarn.lock, Cargo.lock, poetry.lock), deletes each
-      one and re-invokes the matching package manager (`npm install
+      pnpm-lock.yaml, yarn.lock, Cargo.lock, poetry.lock, uv.lock), deletes
+      each one and re-invokes the matching package manager (`npm install
       --package-lock-only`, `pnpm install --lockfile-only`, `yarn install
-      --mode update-lockfile`, `cargo generate-lockfile`, `poetry lock`)
+      --mode update-lockfile`, `cargo generate-lockfile`, `poetry lock`,
+      `uv lock`)
       from the lockfile's directory, then commits and pushes. Anything
       else (semantic conflicts, missing/failed resolver, push rejection)
       is reported as NeedsAgent; the worktree is fully cleaned up so the
