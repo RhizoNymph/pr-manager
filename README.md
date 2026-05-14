@@ -15,8 +15,8 @@ long-running process plus `tmux` and a supported agent CLI on PATH.
 
 ## Quickstart
 
-Prereqs: Rust toolchain, `tmux` on PATH, and the agent CLI you plan to use
-(`claude` or `codex`) on PATH.
+Prereqs: Rust toolchain, `tmux` on PATH, and the agent CLI/harness you plan
+to use (`claude`, `codex`, or a custom harness command) on PATH.
 
 ```sh
 cp pr-manager.toml.example pr-manager.toml
@@ -46,9 +46,11 @@ When the poller spawns an agent, the log line includes a `tmux attach` command
 to follow along; detach with `Ctrl-b d`. See [Configuration](#configuration)
 for the full reference.
 
-## Supported agents
+## Agent harnesses
 
-| Agent | Default command |
+pr-manager ships with two built-in harnesses:
+
+| Harness | Default command |
 |---|---|
 | `claude` | `claude [claude_extra_args] -p < /tmp/pr-manager-<repo>-pr-<n>-<ts>.prompt` |
 | `codex` | `codex exec --ask-for-approval never --sandbox workspace-write --add-dir <worktree-cache> [codex_extra_args] - < /tmp/pr-manager-<repo>-pr-<n>-<ts>.prompt` |
@@ -56,7 +58,23 @@ for the full reference.
 Set `agent = "codex"` in `[defaults]` (or override per-repo) to use Codex.
 `agent_bin` overrides the selected provider's binary, and `agent_args`
 replaces the entire provider arg vector after the binary. All arg strings
-are whitespace-split.
+are whitespace-split; arg arrays are passed as-is.
+
+Any other `agent` value names a custom harness declared under
+`[harnesses.<name>]`:
+
+```toml
+[defaults]
+agent = "local_agent"
+
+[harnesses.local_agent]
+bin = "my-agent"
+args = ["run", "--stdin"]
+```
+
+Custom harnesses receive the same prompt stdin as the built-in harnesses.
+If a tool cannot read prompts from stdin, wrap it with a small script and
+point `bin` at that wrapper.
 
 ## Agent arguments
 
@@ -186,6 +204,7 @@ log_level = "info"
 agent = "claude"             # or "codex"
 agent_auth = "oauth"         # or "api"
 claude_extra_args = "--permission-mode bypassPermissions"
+# agent may also name a custom [harnesses.<name>] table
 # token_env = "GITHUB_TOKEN" # default; per-repo `token_env` overrides
 # cache_root = "/abs/path"   # defaults to $XDG_CACHE_HOME or ~/.cache
 # pr_authors = ["alice", "renovate[bot]"]
@@ -209,7 +228,8 @@ repo_path = "/abs/path/2"
 `[defaults]` keys: `poll_interval_seconds`, `recent_merges_limit`, `log_level`,
 `agent`, `agent_bin`, `agent_args`, `agent_auth`, `claude_bin`,
 `claude_extra_args`, `codex_bin`, `codex_extra_args`, `token_env`,
-`cache_root`, `pr_authors`. `log_level` and `cache_root` are process-wide;
+`cache_root`, `pr_authors`. `[harnesses.<name>]` tables may define custom
+`bin` and `args` values. `log_level` and `cache_root` are process-wide;
 everything else can be overridden per-repo (`pr_authors` replaces, rather
 than merges with, the default list).
 

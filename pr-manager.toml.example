@@ -16,6 +16,7 @@ log_level = "info"
 agent = "claude"             # or "codex"
 agent_auth = "oauth"         # or "api"
 claude_extra_args = "--permission-mode bypassPermissions"
+# Any `agent` value may also name a custom [harnesses.<name>] table.
 # token_env = "GITHUB_TOKEN" # default; per-repo `token_env` overrides this
 # cache_root = "/abs/path"   # defaults to $XDG_CACHE_HOME or ~/.cache
 # pr_authors = ["alice", "renovate[bot]"]
@@ -23,6 +24,14 @@ claude_extra_args = "--permission-mode bypassPermissions"
 #   Lets two operators run pr-manager against the same repo without stepping
 #   on each other. Unset or [] = process every open auto-merge PR.
 #   Per-repo `pr_authors` replaces (not merges with) the default list.
+
+# Custom harnesses can run any local command. Args may be a string or list.
+# pr-manager feeds the prompt on stdin, just like the built-in claude/codex
+# harnesses.
+#
+# [harnesses.local_agent]
+# bin = "my-agent"
+# args = ["run", "--stdin"]
 
 [[repos]]
 github_repo = "acme/widgets"

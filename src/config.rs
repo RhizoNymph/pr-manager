@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::types::{
-    AgentConfig, AgentName, AuthMode, Config, ConfigError, Globals, LogLevel, RepoConfig, RepoId,
+    AgentConfig, AuthMode, Config, ConfigError, Globals, LogLevel, RepoConfig, RepoId,
 };
 
 const DEFAULT_TOKEN_ENV: &str = "GITHUB_TOKEN";
@@ -77,7 +77,22 @@ struct TomlRoot {
     #[serde(default)]
     defaults: TomlDefaults,
     #[serde(default)]
+    harnesses: HashMap<String, TomlHarness>,
+    #[serde(default)]
     repos: Vec<TomlRepo>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(untagged)]
+enum TomlArgs {
+    String(String),
+    List(Vec<String>),
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+struct TomlHarness {
+    bin: Option<String>,
+    args: Option<TomlArgs>,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -87,12 +102,12 @@ struct TomlDefaults {
     log_level: Option<String>,
     agent: Option<String>,
     agent_bin: Option<String>,
-    agent_args: Option<String>,
+    agent_args: Option<TomlArgs>,
     agent_auth: Option<String>,
     claude_bin: Option<String>,
-    claude_extra_args: Option<String>,
+    claude_extra_args: Option<TomlArgs>,
     codex_bin: Option<String>,
-    codex_extra_args: Option<String>,
+    codex_extra_args: Option<TomlArgs>,
     /// Default name of the env var to read each repo's GitHub token from.
     /// Tokens themselves are NEVER in the file.
     token_env: Option<String>,
@@ -113,12 +128,12 @@ struct TomlRepo {
     recent_merges_limit: Option<u32>,
     agent: Option<String>,
     agent_bin: Option<String>,
-    agent_args: Option<String>,
+    agent_args: Option<TomlArgs>,
     agent_auth: Option<String>,
     claude_bin: Option<String>,
-    claude_extra_args: Option<String>,
+    claude_extra_args: Option<TomlArgs>,
     codex_bin: Option<String>,
-    codex_extra_args: Option<String>,
+    codex_extra_args: Option<TomlArgs>,
     /// Allowlist of PR author logins. When set and non-empty, pr-manager only
     /// processes PRs whose author appears here (case-insensitive). Unset or
     /// empty means "no filter" — every open auto-merge PR is handled. Per-repo
@@ -218,7 +233,7 @@ fn load_toml(path: &Path) -> Result<Config, ConfigError> {
             ));
         }
 
-        let agent_kind = parse_agent_name(
+        let agent_name = resolve_agent_name(
             raw_repo
                 .agent
                 .as_deref()
@@ -249,27 +264,38 @@ fn load_toml(path: &Path) -> Result<Config, ConfigError> {
                 .or(parsed.defaults.agent_bin.as_deref()),
             agent_args: raw_repo
                 .agent_args
-                .as_deref()
-                .or(parsed.defaults.agent_args.as_deref()),
+                .as_ref()
+                .or(parsed.defaults.agent_args.as_ref()),
             claude_bin: raw_repo
                 .claude_bin
                 .as_deref()
                 .or(parsed.defaults.claude_bin.as_deref()),
             claude_extra_args: raw_repo
                 .claude_extra_args
-                .as_deref()
-                .or(parsed.defaults.claude_extra_args.as_deref()),
+                .as_ref()
+                .or(parsed.defaults.claude_extra_args.as_ref()),
             codex_bin: raw_repo
                 .codex_bin
                 .as_deref()
                 .or(parsed.defaults.codex_bin.as_deref()),
             codex_extra_args: raw_repo
                 .codex_extra_args
-                .as_deref()
-                .or(parsed.defaults.codex_extra_args.as_deref()),
+                .as_ref()
+                .or(parsed.defaults.codex_extra_args.as_ref()),
         };
 
-        let agent = build_agent_config(&agent_inputs, agent_kind, &worktree_base);
+        let agent = match build_agent_config(
+            &agent_inputs,
+            &agent_name,
+            parsed.harnesses.get(&agent_name),
+            &worktree_base,
+        ) {
+            Ok(agent) => agent,
+            Err(issue) => {
+                issues.push(format!("{issue_prefix} {issue}"));
+                continue;
+            }
+        };
 
         let pr_authors = resolve_pr_authors(
             raw_repo.pr_authors.as_deref(),
@@ -325,16 +351,16 @@ fn parse_log_level(value: Option<&str>, issues: &mut Vec<String>) -> LogLevel {
     }
 }
 
-fn parse_agent_name(value: Option<&str>, prefix: &str, issues: &mut Vec<String>) -> AgentName {
-    match value {
-        None => AgentName::Claude,
-        Some("claude") => AgentName::Claude,
-        Some("codex") => AgentName::Codex,
-        Some(other) => {
-            issues.push(format!(
-                "{prefix} invalid agent {other:?}; expected one of claude,codex"
-            ));
-            AgentName::Claude
+fn resolve_agent_name(value: Option<&str>, prefix: &str, issues: &mut Vec<String>) -> String {
+    match value.map(str::trim) {
+        None | Some("") => "claude".to_string(),
+        Some(value) => {
+            if value.contains(char::is_whitespace) {
+                issues.push(format!("{prefix} agent must be a single harness name"));
+                "claude".to_string()
+            } else {
+                value.to_string()
+            }
         }
     }
 }
@@ -396,22 +422,45 @@ fn absolutize(p: &str) -> PathBuf {
 /// already merged with `[defaults]`.
 struct AgentInputs<'a> {
     agent_bin: Option<&'a str>,
-    agent_args: Option<&'a str>,
+    agent_args: Option<&'a TomlArgs>,
     claude_bin: Option<&'a str>,
-    claude_extra_args: Option<&'a str>,
+    claude_extra_args: Option<&'a TomlArgs>,
     codex_bin: Option<&'a str>,
-    codex_extra_args: Option<&'a str>,
+    codex_extra_args: Option<&'a TomlArgs>,
 }
 
 fn build_agent_config(
     inputs: &AgentInputs<'_>,
-    agent: AgentName,
+    agent_name: &str,
+    harness: Option<&TomlHarness>,
     worktree_base: &Path,
-) -> AgentConfig {
+) -> Result<AgentConfig, String> {
     let generic_args = inputs.agent_args.map(parse_args);
 
-    match agent {
-        AgentName::Claude => {
+    match harness {
+        Some(harness) => {
+            let bin = inputs
+                .agent_bin
+                .or(harness.bin.as_deref())
+                .ok_or_else(|| format!("harness {agent_name:?} must set bin"))?
+                .trim();
+            if bin.is_empty() {
+                return Err(format!("harness {agent_name:?} bin must not be empty"));
+            }
+            let args = generic_args.unwrap_or_else(|| {
+                harness
+                    .args
+                    .as_ref()
+                    .map(parse_args)
+                    .unwrap_or_default()
+            });
+            Ok(AgentConfig {
+                name: agent_name.to_string(),
+                bin: bin.to_string(),
+                args,
+            })
+        }
+        None if agent_name == "claude" => {
             let bin = inputs
                 .agent_bin
                 .or(inputs.claude_bin)
@@ -420,18 +469,21 @@ fn build_agent_config(
             let args = match generic_args {
                 Some(args) => args,
                 None => {
-                    let mut v = parse_args(inputs.claude_extra_args.unwrap_or(""));
+                    let mut v = inputs
+                        .claude_extra_args
+                        .map(parse_args)
+                        .unwrap_or_default();
                     v.push("-p".to_string());
                     v
                 }
             };
-            AgentConfig {
-                name: AgentName::Claude,
+            Ok(AgentConfig {
+                name: "claude".to_string(),
                 bin,
                 args,
-            }
+            })
         }
-        AgentName::Codex => {
+        None if agent_name == "codex" => {
             let bin = inputs
                 .agent_bin
                 .or(inputs.codex_bin)
@@ -440,7 +492,10 @@ fn build_agent_config(
             let args = match generic_args {
                 Some(args) => args,
                 None => {
-                    let extra = parse_args(inputs.codex_extra_args.unwrap_or(""));
+                    let extra = inputs
+                        .codex_extra_args
+                        .map(parse_args)
+                        .unwrap_or_default();
                     let mut v: Vec<String> = vec![
                         "exec".into(),
                         "--ask-for-approval".into(),
@@ -455,21 +510,29 @@ fn build_agent_config(
                     v
                 }
             };
-            AgentConfig {
-                name: AgentName::Codex,
+            Ok(AgentConfig {
+                name: "codex".to_string(),
                 bin,
                 args,
-            }
+            })
         }
+        None => Err(format!(
+            "unknown agent harness {agent_name:?}; define [harnesses.{agent_name}] or use built-in claude/codex"
+        )),
     }
 }
 
-fn parse_args(value: &str) -> Vec<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        Vec::new()
-    } else {
-        trimmed.split_whitespace().map(str::to_string).collect()
+fn parse_args(value: &TomlArgs) -> Vec<String> {
+    match value {
+        TomlArgs::String(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                Vec::new()
+            } else {
+                trimmed.split_whitespace().map(str::to_string).collect()
+            }
+        }
+        TomlArgs::List(values) => values.clone(),
     }
 }
 
@@ -551,4 +614,59 @@ fn parse_argv(argv: &[String]) -> Result<Option<String>, ConfigError> {
         return Err(ConfigError::new("invalid command line", issues));
     }
     Ok(config_path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_inputs<'a>() -> AgentInputs<'a> {
+        AgentInputs {
+            agent_bin: None,
+            agent_args: None,
+            claude_bin: None,
+            claude_extra_args: None,
+            codex_bin: None,
+            codex_extra_args: None,
+        }
+    }
+
+    #[test]
+    fn custom_harness_resolves_command() {
+        let harness = TomlHarness {
+            bin: Some("my-agent".into()),
+            args: Some(TomlArgs::List(vec!["run".into(), "--stdin".into()])),
+        };
+
+        let config = build_agent_config(
+            &empty_inputs(),
+            "local",
+            Some(&harness),
+            Path::new("/tmp/pr-manager/acme__widgets/wt"),
+        )
+        .expect("custom harness should resolve");
+
+        assert_eq!(config.name, "local");
+        assert_eq!(config.bin, "my-agent");
+        assert_eq!(
+            config.args,
+            vec!["run", "--stdin"]
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn unknown_harness_without_definition_is_error() {
+        let err = build_agent_config(
+            &empty_inputs(),
+            "missing",
+            None,
+            Path::new("/tmp/pr-manager/acme__widgets/wt"),
+        )
+        .expect_err("unknown harness should not resolve");
+
+        assert!(err.contains("unknown agent harness"));
+    }
 }

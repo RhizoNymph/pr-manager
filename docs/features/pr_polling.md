@@ -14,8 +14,8 @@
   tmux session** named `pr-manager-<owner>__<repo>-pr-<n>` running the
   configured coding agent against a tempfile prompt inside the repo's
   `repo_path`.
-- Supports `agent = "claude"` and `agent = "codex"` (per-repo overridable
-  in TOML mode).
+- Supports built-in `agent = "claude"` and `agent = "codex"` harnesses, plus
+  custom harnesses declared under `[harnesses.<name>]`.
 - Reconciles each repo's active sessions on every tick:
   - Sweep: drop entries whose tmux session is gone (global; cheap).
   - Force-close: PR's `head_sha` advanced past what we spawned against,
@@ -174,10 +174,11 @@ from scratch using the same path, and the prompt explicitly notes that
 the fast-path was already attempted so any conflicts the agent observes
 are genuinely semantic.
 
-## Agent commands
+## Agent harnesses
 
-The runner always writes the prompt to a tempfile and pipes it to stdin. The
-provider config decides which CLI args make that stdin prompt meaningful.
+The runner always writes the prompt to an internal tempfile and redirects it
+to the harness on stdin. This keeps custom harnesses on the same contract as
+the built-in Claude and Codex harnesses.
 
 Default Claude command:
 
@@ -195,7 +196,22 @@ codex exec --ask-for-approval never --sandbox workspace-write \
 `agent_bin` overrides the selected provider binary. `agent_args` replaces the
 entire provider arg vector after the binary; if it is set, provider-specific
 defaults such as Claude's `-p` or Codex's `exec ... -` are not added. Env
-and TOML arg strings are whitespace-split.
+and TOML arg strings are whitespace-split; TOML arg arrays are passed as-is.
+
+Any non-built-in `agent` value must name a custom harness table:
+
+```toml
+[defaults]
+agent = "local_agent"
+
+[harnesses.local_agent]
+bin = "my-agent"
+args = ["run", "--stdin"]
+```
+
+Custom harnesses receive the prompt on stdin. If a tool requires a prompt
+file path instead, wrap it in a small script that reads stdin and adapts to
+that tool's interface.
 
 ## Running
 

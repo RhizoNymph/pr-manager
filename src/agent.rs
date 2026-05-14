@@ -7,7 +7,7 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 
 use crate::tmux::{has_session, kill_session, new_detached_session, NewSessionArgs, TmuxError};
-use crate::types::{AgentName, AuthMode, PrEvent, RepoConfig, RepoId};
+use crate::types::{AuthMode, PrEvent, RepoConfig, RepoId};
 
 #[derive(Debug, Clone)]
 pub struct ActiveSession {
@@ -23,7 +23,7 @@ pub struct ActiveSession {
     /// runs can be inspected after the tmux session is gone.
     pub log_file: PathBuf,
     pub started_at_ms: u128,
-    pub agent_name: AgentName,
+    pub agent_name: String,
 }
 
 #[derive(Debug, Error)]
@@ -122,7 +122,7 @@ impl AgentRunner {
             prompt_file: prompt_file.clone(),
             log_file: log_file.clone(),
             started_at_ms: now_ms,
-            agent_name: repo.agent.name,
+            agent_name: repo.agent.name.clone(),
         };
 
         self.sessions
@@ -134,7 +134,7 @@ impl AgentRunner {
             repo = %repo.github_repo,
             pr = event.pr.number,
             session = %name,
-            agent = repo.agent.name.as_str(),
+            agent = %repo.agent.name,
             attach = %format!("tmux attach -t {name}"),
             repo_path = %repo.repo_path.display(),
             log_file = %log_file.display(),
@@ -162,7 +162,7 @@ impl AgentRunner {
             repo = %repo_id.as_str(),
             pr = pr_number,
             session = %sess.session_name,
-            agent = sess.agent_name.as_str(),
+            agent = %sess.agent_name,
             log_file = %sess.log_file.display(),
             reason = %reason,
             "closed agent session"
@@ -198,7 +198,7 @@ impl AgentRunner {
                     repo = %removed.repo_id.as_str(),
                     pr = removed.pr_number,
                     session = %removed.session_name,
-                    agent = removed.agent_name.as_str(),
+                    agent = %removed.agent_name,
                     ran_for_ms = (now_ms - removed.started_at_ms) as u64,
                     log_file = %removed.log_file.display(),
                     exit_code = exit_code.map(|c| c as i64),
@@ -224,7 +224,7 @@ impl AgentRunner {
                 repo = %sess.repo_id.as_str(),
                 pr = sess.pr_number,
                 session = %sess.session_name,
-                agent = sess.agent_name.as_str(),
+                agent = %sess.agent_name,
                 log_file = %sess.log_file.display(),
                 "killed agent session on shutdown"
             );

@@ -381,7 +381,7 @@ fn log_warn(repo: &RepoConfig, err: &GitHubError, msg: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{AgentConfig, AgentName, AuthMode, RepoId};
+    use crate::types::{AgentConfig, AuthMode, RepoId};
     use std::path::PathBuf;
 
     fn repo_with_authors(authors: Vec<&str>) -> RepoConfig {
@@ -397,12 +397,15 @@ mod tests {
             logs_base: PathBuf::from("/tmp/pr-manager/acme__widgets/logs"),
             repo_path: PathBuf::from("/tmp/acme/widgets"),
             agent: AgentConfig {
-                name: AgentName::Claude,
+                name: "claude".into(),
                 bin: "claude".into(),
                 args: vec!["-p".into()],
             },
             auth_mode: AuthMode::OAuth,
-            pr_authors: authors.into_iter().map(|s| s.to_ascii_lowercase()).collect(),
+            pr_authors: authors
+                .into_iter()
+                .map(|s| s.to_ascii_lowercase())
+                .collect(),
         }
     }
 

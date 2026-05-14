@@ -83,13 +83,14 @@ Overview:
       (any of poll_interval_seconds, recent_merges_limit, log_level,
       agent, agent_bin, agent_args, agent_auth, claude_bin,
       claude_extra_args, codex_bin, codex_extra_args, token_env,
-      cache_root) plus one or more [[repos]] entries (github_repo +
-      repo_path required; any [defaults] key except log_level and
-      cache_root may be overridden per-repo). Tokens are NEVER stored
-      in the file — token_env names an env var (default GITHUB_TOKEN)
-      read at startup; .env is loaded via dotenv before token
-      resolution. Derives an absolute worktreeBase per repo (under
-      cache_root or XDG_CACHE_HOME or ~/.cache, namespaced by
+      cache_root) plus optional [harnesses.<name>] tables for arbitrary
+      local agent commands, plus one or more [[repos]] entries
+      (github_repo + repo_path required; any [defaults] key except
+      log_level and cache_root may be overridden per-repo). Tokens are
+      NEVER stored in the file — token_env names an env var (default
+      GITHUB_TOKEN) read at startup; .env is loaded via dotenv before
+      token resolution. Derives an absolute worktreeBase per repo
+      (under cache_root or XDG_CACHE_HOME or ~/.cache, namespaced by
       `<owner>__<name>`) embedded into the prompt and passed to Codex's
       default --add-dir, plus a sibling logsBase where each agent
       invocation persists its stdout/stderr.
@@ -98,6 +99,9 @@ Overview:
     codex: >
       codex exec --ask-for-approval never --sandbox workspace-write --add-dir
       <worktreeBase> [codex_extra_args] - < <promptFile>
+    custom: >
+      [harnesses.<name>] bin + args. pr-manager feeds the prompt to every
+      harness on stdin, matching the built-in Claude/Codex contract.
   data_flow: >
     Startup: load_config produces a Config { globals, repos }. main builds
     one GitHubClient per repo and one shared AgentRunner, then calls

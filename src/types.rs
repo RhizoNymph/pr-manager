@@ -1,28 +1,14 @@
 use std::path::PathBuf;
 use thiserror::Error;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AgentName {
-    Claude,
-    Codex,
-}
-
-impl AgentName {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            AgentName::Claude => "claude",
-            AgentName::Codex => "codex",
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
-    pub name: AgentName,
+    /// Resolved harness name. Built-ins are `claude` and `codex`; custom
+    /// harness names come from `[harnesses.<name>]` in the TOML config.
+    pub name: String,
     pub bin: String,
-    /// Arguments passed after the binary. The prompt is always piped on stdin,
-    /// so provider defaults include the provider-specific "read prompt from
-    /// stdin" flag or positional argument.
+    /// Arguments passed after the binary. The prompt is always redirected to
+    /// stdin, matching the built-in Claude/Codex harnesses.
     pub args: Vec<String>,
 }
 
