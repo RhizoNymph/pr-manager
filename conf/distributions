@@ -1,0 +1,7 @@
+Origin: pr-manager
+Label: pr-manager
+Codename: stable
+Architectures: amd64
+Components: main
+Description: pr-manager APT repository
+SignWith: YOUR_GPG_FINGERPRINT_HERE
