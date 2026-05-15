@@ -1,5 +1,5 @@
 [package]
-name = "pr-manager"
+name = "pr-manager-cli"
 version = "0.2.0"
 edition = "2021"
 description = "Standalone GitHub poller that invokes a coding agent to merge main into pending auto-merge PRs."
@@ -38,6 +38,7 @@ url = "2.5.7"
 toml = "0.8.19"
 
 [package.metadata.deb]
+name = "pr-manager"
 maintainer = "RhizoNymph <82485126+RhizoNymph@users.noreply.github.com>"
 copyright = "2026 RhizoNymph"
 license-file = ["LICENSE", "0"]

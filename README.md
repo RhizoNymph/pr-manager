@@ -30,7 +30,7 @@ sudo apt install pr-manager
 Or install from crates.io:
 
 ```sh
-cargo install pr-manager
+cargo install pr-manager-cli
 ```
 
 Or install a downloaded release binary:
@@ -292,7 +292,7 @@ profile needs different execution policy.
   with no flags and no `.env`.
 
 Release maintainers: see [docs/releasing.md](docs/releasing.md) for the
-crates.io and GitHub Pages-backed apt publishing workflow.
+crates.io (`pr-manager-cli`) and GitHub Pages-backed apt publishing workflow.
 
 ## Running as a systemd service
 

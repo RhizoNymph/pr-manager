@@ -566,7 +566,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "pr-manager"
+name = "pr-manager-cli"
 version = "0.2.0"
 dependencies = [
  "anyhow",

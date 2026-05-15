@@ -2,9 +2,13 @@
 
 Releases publish three install paths from one `vX.Y.Z` tag:
 
-- crates.io via `cargo publish`
+- crates.io via `cargo publish` as `pr-manager-cli`
 - a `.deb` package via `cargo-deb`
 - an apt repository served from GitHub Pages on the `apt-repo` branch
+
+The Cargo package is named `pr-manager-cli` because `pr-manager` is already
+taken on crates.io. The installed binary and Debian package are still named
+`pr-manager`.
 
 ## One-time setup
 
