@@ -3,7 +3,20 @@ name = "pr-manager"
 version = "0.2.0"
 edition = "2021"
 description = "Standalone GitHub poller that invokes a coding agent to merge main into pending auto-merge PRs."
-publish = false
+license = "MIT"
+homepage = "https://github.com/RhizoNymph/pr-manager"
+repository = "https://github.com/RhizoNymph/pr-manager"
+readme = "README.md"
+keywords = ["github", "pull-request", "automation", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+exclude = [
+    ".env",
+    "pr-manager.toml",
+    ".agents/",
+    ".claude/",
+    ".codex/",
+    "target/",
+]
 
 [[bin]]
 name = "pr-manager"
@@ -23,3 +36,26 @@ dirs = "6.0.0"
 shell-escape = "0.1.5"
 url = "2.5.7"
 toml = "0.8.19"
+
+[package.metadata.deb]
+maintainer = "RhizoNymph <82485126+RhizoNymph@users.noreply.github.com>"
+copyright = "2026 RhizoNymph"
+license-file = ["LICENSE", "0"]
+extended-description = """\
+Watch GitHub repositories for auto-merge pull requests, merge the default \
+branch into stale PRs, and spawn a configured coding agent in tmux when \
+semantic conflicts need attention."""
+section = "utils"
+priority = "optional"
+depends = "$auto, git, tmux"
+assets = [
+    ["target/release/pr-manager", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/pr-manager/README.md", "644"],
+    ["pr-manager.toml.example", "usr/share/doc/pr-manager/examples/pr-manager.toml", "644"],
+    ["pr-manager.service.binary.example", "usr/share/doc/pr-manager/examples/pr-manager.service", "644"],
+    [".env.example", "usr/share/doc/pr-manager/examples/pr-manager.env", "644"],
+]
+
+[profile.release]
+strip = true
+lto = true

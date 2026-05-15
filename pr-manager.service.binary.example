@@ -1,0 +1,83 @@
+# systemd user-service unit for pr-manager installed as a binary.
+#
+# This example assumes pr-manager was installed by a package manager at:
+#   /usr/bin/pr-manager
+#
+# If you downloaded a release binary instead, install it at:
+#   ~/.local/bin/pr-manager
+# and change ExecStart below to:
+#   ExecStart=%h/.local/bin/pr-manager --config %h/.config/pr-manager/config.toml
+#
+# Install:
+#   # after the apt repository is configured:
+#   sudo apt install pr-manager
+#   mkdir -p ~/.config/pr-manager ~/.config/systemd/user
+#   $EDITOR ~/.config/pr-manager/config.toml
+#   printf 'GITHUB_TOKEN=github_pat_...\n' > ~/.config/pr-manager/pr-manager.env
+#   chmod 0600 ~/.config/pr-manager/pr-manager.env
+#   cp pr-manager.service.binary.example ~/.config/systemd/user/pr-manager.service
+#   # edit config.toml and pr-manager.env for your repos and token
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now pr-manager
+#
+# Survive logout (recommended for a long-running poller):
+#   sudo loginctl enable-linger "$USER"
+#
+# Inspect:
+#   systemctl --user status pr-manager
+#   journalctl --user -u pr-manager -f
+#   systemctl --user restart pr-manager
+#
+# Why this is a *user* service (--user, not a system unit):
+#   - pr-manager spawns `claude` / `codex`, which authenticate via the
+#     user's on-disk OAuth credentials.
+#   - It reads checkouts under your home directory.
+#   - It writes a per-user cache under XDG_CACHE_HOME or ~/.cache.
+# A system unit would have access to none of those by default.
+
+[Unit]
+Description=pr-manager - GitHub PR auto-merge poller
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# --- replace these three paths with your own -------------------------------
+# Absolute path to the installed pr-manager binary. apt packages normally
+# install here; downloaded release binaries often live at %h/.local/bin.
+ExecStart=/usr/bin/pr-manager --config %h/.config/pr-manager/config.toml
+
+# EnvironmentFile is parsed as KEY=VALUE per line. systemd does NOT do shell
+# expansion. Tokens go here; everything else lives in the TOML file.
+EnvironmentFile=%h/.config/pr-manager/pr-manager.env
+
+# `pr-manager` doesn't care about cwd in TOML mode (config path is
+# absolute), but agents and the merger run subprocesses, so a real dir
+# is preferable to /.
+WorkingDirectory=%h
+# ---------------------------------------------------------------------------
+
+# systemd user services start with a sparse PATH. Extend it so the agent
+# CLI, tmux, and the lockfile resolvers (npm/pnpm/yarn/cargo/poetry/uv) are
+# visible to the spawned shell. Add anything else you need (e.g. nvm,
+# pyenv, rustup shims).
+Environment=PATH=%h/.local/bin:%h/.cargo/bin:%h/.nvm/versions/node/current/bin:/usr/local/bin:/usr/bin:/bin
+
+# pr-manager handles SIGTERM: it cancels every per-repo poller, joins
+# them, then runner.shutdown() kills tracked tmux sessions. Give it
+# room.
+TimeoutStopSec=30
+
+Restart=on-failure
+RestartSec=5s
+
+# Leave the tmux server (and any agent sessions it owns) alone when the
+# service stops or restarts. Without this, the cgroup teardown would kill
+# every running agent. The cost: a `systemctl restart` may briefly leave
+# orphan sessions; the new pr-manager's first reconciliation pass closes
+# any whose PR has moved on.
+KillMode=process
+
+[Install]
+WantedBy=default.target

@@ -15,19 +15,46 @@ long-running process plus `tmux` and a supported agent CLI on PATH.
 
 ## Quickstart
 
-Prereqs: Rust toolchain, `tmux` on PATH, and the agent CLI/harness you plan
-to use (`claude`, `codex`, or a custom harness command) on PATH.
+Prereqs: `tmux` on PATH and the agent CLI/harness you plan to use (`claude`,
+`codex`, or a custom harness command) on PATH.
+
+Install `pr-manager` from APT:
 
 ```sh
-cp pr-manager.toml.example pr-manager.toml
-# edit pr-manager.toml: list each repo under [[repos]] with github_repo + repo_path.
-cp .env.example .env
-# edit .env: set GITHUB_TOKEN (or per-repo token env vars referenced from the TOML).
-cargo run --release
+curl -fsSL https://rhizonymph.github.io/pr-manager/gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/pr-manager.gpg
+echo "deb [signed-by=/usr/share/keyrings/pr-manager.gpg] https://rhizonymph.github.io/pr-manager stable main" | sudo tee /etc/apt/sources.list.d/pr-manager.list
+sudo apt update
+sudo apt install pr-manager
 ```
 
-That's it. `cargo run --release` looks for `./pr-manager.toml` by default;
-pass `--config <path>` or set `PR_MANAGER_CONFIG=<path>` to point elsewhere.
+Or install from crates.io:
+
+```sh
+cargo install pr-manager
+```
+
+Or install a downloaded release binary:
+
+```sh
+mkdir -p ~/.local/bin
+install -m 0755 ./pr-manager ~/.local/bin/pr-manager
+```
+
+Make sure `~/.local/bin` is on PATH, or invoke the binary as
+`~/.local/bin/pr-manager`.
+
+Then create a config and run it:
+
+```sh
+mkdir -p ~/.config/pr-manager
+$EDITOR ~/.config/pr-manager/config.toml
+export GITHUB_TOKEN=github_pat_...
+pr-manager
+```
+
+That's it. A packaged or downloaded binary looks for
+`~/.config/pr-manager/config.toml` by default. Pass `--config <path>` or set
+`PR_MANAGER_CONFIG=<path>` to point elsewhere.
 
 The simplest config is one repo:
 
@@ -252,6 +279,10 @@ profile needs different execution policy.
 
 ## Scripts
 
+- `pr-manager` — runs the installed binary and uses
+  `~/.config/pr-manager/config.toml` by default.
+- `pr-manager --config /path/to/file.toml` — runs the installed binary with
+  an explicit config path.
 - `cargo run --release` — uses `./pr-manager.toml`
 - `cargo run --release -- --config /path/to/file.toml` — explicit config path
 - `cargo build --release` — build the standalone binary at `target/release/pr-manager`
@@ -260,13 +291,24 @@ profile needs different execution policy.
   exported in your environment, you can then run `pr-manager` from anywhere
   with no flags and no `.env`.
 
+Release maintainers: see [docs/releasing.md](docs/releasing.md) for the
+crates.io and GitHub Pages-backed apt publishing workflow.
+
 ## Running as a systemd service
 
-A user-service template lives at `pr-manager.service.example`.
+User-service templates:
+
+- `pr-manager.service.example` - for a repo checkout built locally with
+  `cargo build --release`.
+- `pr-manager.service.binary.example` - for an installed binary, whether it
+  came from `apt` at `/usr/bin/pr-manager` or a downloaded release at
+  `~/.local/bin/pr-manager`.
 
 ```sh
 mkdir -p ~/.config/systemd/user
-cp pr-manager.service.example ~/.config/systemd/user/pr-manager.service
+cp pr-manager.service.binary.example ~/.config/systemd/user/pr-manager.service
+# or, for a repo checkout built locally:
+# cp pr-manager.service.example ~/.config/systemd/user/pr-manager.service
 # edit the file: replace the ExecStart binary/config paths and the
 # EnvironmentFile path with your own absolute paths.
 systemctl --user daemon-reload

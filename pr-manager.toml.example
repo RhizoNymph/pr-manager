@@ -5,6 +5,8 @@
 # from that env var at startup.
 #
 # Run with:
+#   pr-manager --config pr-manager.toml
+# or, from a source checkout:
 #   cargo run --release -- --config pr-manager.toml
 # or set PR_MANAGER_CONFIG=pr-manager.toml in the environment.
 
