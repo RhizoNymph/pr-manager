@@ -43,18 +43,24 @@ install -m 0755 ./pr-manager ~/.local/bin/pr-manager
 Make sure `~/.local/bin` is on PATH, or invoke the binary as
 `~/.local/bin/pr-manager`.
 
-Then create a config and run it:
+Then create a config, drop your token in a `.env` next to it, and run it:
 
 ```sh
 mkdir -p ~/.config/pr-manager
 $EDITOR ~/.config/pr-manager/config.toml
-export GITHUB_TOKEN=github_pat_...
-pr-manager
+printf 'GITHUB_TOKEN=github_pat_...\n' > ~/.config/pr-manager/.env
+chmod 0600 ~/.config/pr-manager/.env
+( cd ~/.config/pr-manager && pr-manager )
 ```
 
-That's it. A packaged or downloaded binary looks for
-`~/.config/pr-manager/config.toml` by default. Pass `--config <path>` or set
-`PR_MANAGER_CONFIG=<path>` to point elsewhere.
+`pr-manager` loads `.env` from its current working directory, so running it
+from `~/.config/pr-manager` picks the token up automatically — no `export`
+needed. When you run it under systemd (see below), the unit reads the same
+file via `EnvironmentFile=` so the token never has to live in your shell.
+
+A packaged or downloaded binary looks for `~/.config/pr-manager/config.toml`
+by default. Pass `--config <path>` or set `PR_MANAGER_CONFIG=<path>` to
+point elsewhere.
 
 The simplest config is one repo:
 
@@ -219,9 +225,12 @@ If none of those exist the process exits with a config error.
 
 Tokens (`GITHUB_TOKEN` or whatever `token_env` names) are read directly from
 the process environment. A `.env` file in the working directory is loaded if
-present, but is optional — exporting the variables in your shell, a systemd
-unit's `Environment=`, or any other mechanism that puts them in the
-environment before pr-manager starts works equally well.
+present — the recommended layout is `~/.config/pr-manager/.env` (run
+pr-manager from that directory, or point the systemd unit's
+`EnvironmentFile=` at it). `Environment=KEY=VALUE` lines in the unit work
+too if you'd rather inline the value. Exporting in your shell works for
+quick one-offs but means the token has to be in your shell environment
+every time.
 
 ```toml
 [defaults]
@@ -287,9 +296,10 @@ profile needs different execution policy.
 - `cargo run --release -- --config /path/to/file.toml` — explicit config path
 - `cargo build --release` — build the standalone binary at `target/release/pr-manager`
 - `cargo install --path .` — install the binary to `~/.cargo/bin/pr-manager`.
-  With a config at `~/.config/pr-manager/config.toml` and `GITHUB_TOKEN`
-  exported in your environment, you can then run `pr-manager` from anywhere
-  with no flags and no `.env`.
+  With a config at `~/.config/pr-manager/config.toml` and a matching
+  `~/.config/pr-manager/.env` containing `GITHUB_TOKEN=...`, you can then
+  run `( cd ~/.config/pr-manager && pr-manager )` with no flags. Exporting
+  `GITHUB_TOKEN` in your shell instead also works.
 
 Release maintainers: see [docs/releasing.md](docs/releasing.md) for the
 crates.io (`pr-manager-cli`) and GitHub Pages-backed apt publishing workflow.
@@ -324,9 +334,11 @@ journalctl --user -u pr-manager -f
 ```
 
 The unit runs as your user (so `claude`/`codex` see your OAuth creds and
-your checkouts), reads tokens from the configured `EnvironmentFile=`,
-extends `PATH` so the agent CLI and lockfile resolvers are visible, and
-uses `KillMode=process` so a `systemctl restart` doesn't kill the tmux
+your checkouts), reads tokens from `EnvironmentFile=%h/.config/pr-manager/.env`
+(swap in `Environment=GITHUB_TOKEN=...` if you'd rather inline the value
+than keep a separate file — never use `export`, systemd ignores shell
+state), extends `PATH` so the agent CLI and lockfile resolvers are visible,
+and uses `KillMode=process` so a `systemctl restart` doesn't kill the tmux
 server underneath running agent sessions. See the comments in the file
 for details.
 

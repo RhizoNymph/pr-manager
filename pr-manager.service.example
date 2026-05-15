@@ -1,9 +1,12 @@
 # systemd user-service unit for pr-manager.
 #
 # Install:
-#   mkdir -p ~/.config/systemd/user
+#   mkdir -p ~/.config/pr-manager ~/.config/systemd/user
+#   # tokens go in an EnvironmentFile, not `export` (systemd ignores shell state):
+#   printf 'GITHUB_TOKEN=github_pat_...\n' > ~/.config/pr-manager/.env
+#   chmod 0600 ~/.config/pr-manager/.env
 #   cp pr-manager.service.example ~/.config/systemd/user/pr-manager.service
-#   # edit the file to point at your own binary, config, and .env paths
+#   # edit the file to point at your own binary and config paths
 #   systemctl --user daemon-reload
 #   systemctl --user enable --now pr-manager
 #
@@ -35,8 +38,14 @@ Type=simple
 ExecStart=%h/Code/devtools/pr-manager/target/release/pr-manager --config %h/Code/devtools/pr-manager/pr-manager.toml
 
 # `.env` is parsed as KEY=VALUE per line. systemd does NOT do shell
-# expansion. Tokens go here; everything else lives in the TOML file.
-EnvironmentFile=%h/Code/devtools/pr-manager/.env
+# expansion, and `export` in a shell has no effect on this unit — tokens
+# must come in via EnvironmentFile= or Environment=. Tokens go here;
+# everything else lives in the TOML file.
+#
+# Alternative: inline the value directly with `Environment=` (one var per
+# line) and skip the file:
+#   Environment=GITHUB_TOKEN=github_pat_...
+EnvironmentFile=%h/.config/pr-manager/.env
 
 # `pr-manager` doesn't care about cwd in TOML mode (config path is
 # absolute), but agents and the merger run subprocesses, so a real dir
