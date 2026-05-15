@@ -53,7 +53,7 @@ jobs:
         run: |
           name="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].name')"
           version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
-          if curl -fsS "https://crates.io/api/v1/crates/${name}/${version}" >/dev/null; then
+          if curl -A "pr-manager-release-workflow" -fsS "https://crates.io/api/v1/crates/${name}/${version}" >/dev/null; then
             echo "${name} ${version} is already published on crates.io"
             exit 0
           fi
@@ -111,7 +111,21 @@ jobs:
 
       - name: Import GPG key
         run: |
+          mkdir -p ~/.gnupg
+          chmod 700 ~/.gnupg
+          cat > ~/.gnupg/gpg.conf <<'EOF'
+          batch
+          yes
+          pinentry-mode loopback
+          EOF
+          echo "allow-loopback-pinentry" > ~/.gnupg/gpg-agent.conf
           echo "${{ secrets.GPG_PRIVATE_KEY }}" | base64 -d | gpg --batch --import
+          key_fpr="$(gpg --batch --with-colons --list-secret-keys | awk -F: '/^fpr:/ {print $10; exit}')"
+          if [ -z "$key_fpr" ]; then
+            echo "No secret signing key was imported" >&2
+            exit 1
+          fi
+          echo "KEY_FPR=$key_fpr" >> "$GITHUB_ENV"
 
       - name: Install reprepro
         run: sudo apt-get update && sudo apt-get install -y reprepro
@@ -119,10 +133,25 @@ jobs:
       - name: Add .deb to repository
         run: |
           cd apt-repo
+          sed -i '/^SignWith:/d' conf/distributions
+          sed -i '/^ask-passphrase$/d' conf/options
           find ../artifacts -name '*.deb' -print0 | while IFS= read -r -d '' deb; do
             reprepro remove stable pr-manager || true
             reprepro includedeb stable "$deb"
           done
+
+      - name: Sign APT repository
+        env:
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          cd apt-repo
+          gpg_args=(--batch --yes --pinentry-mode loopback --local-user "$KEY_FPR")
+          if [ -n "${GPG_PASSPHRASE:-}" ]; then
+            gpg_args+=(--passphrase "$GPG_PASSPHRASE")
+          fi
+          rm -f dists/stable/InRelease dists/stable/Release.gpg
+          gpg "${gpg_args[@]}" --clearsign -o dists/stable/InRelease dists/stable/Release
+          gpg "${gpg_args[@]}" --armor --detach-sign -o dists/stable/Release.gpg dists/stable/Release
 
       - name: Push updated repository
         run: |

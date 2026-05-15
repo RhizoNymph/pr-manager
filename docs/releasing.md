@@ -27,6 +27,13 @@ Actions as a base64-encoded secret named:
 GPG_PRIVATE_KEY
 ```
 
+If the exported private key is passphrase-protected, also add the passphrase
+as a GitHub Actions secret named:
+
+```text
+GPG_PASSPHRASE
+```
+
 Example export:
 
 ```sh
@@ -50,7 +57,6 @@ Codename: stable
 Architectures: amd64
 Components: main
 Description: pr-manager APT repository
-SignWith: <gpg-key-fingerprint>
 ```
 
 `conf/options`:
@@ -58,7 +64,6 @@ SignWith: <gpg-key-fingerprint>
 ```text
 verbose
 basedir .
-ask-passphrase
 ```
 
 `gpg.key` should contain the public key:
@@ -95,3 +100,8 @@ The release workflow will:
 5. build `target/debian/pr-manager_<version>_amd64.deb`
 6. update the `apt-repo` branch with `reprepro`
 7. create a GitHub Release containing the binary tarball and `.deb`
+
+The workflow signs the apt repository manually with GPG after `reprepro`
+updates the package indexes. That avoids interactive pinentry in GitHub
+Actions and works with a passphrase-protected key when `GPG_PASSPHRASE` is
+configured.
