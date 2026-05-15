@@ -1,6 +1,5 @@
+Component: main
 Origin: pr-manager
 Label: pr-manager
-Codename: stable
-Architectures: amd64
-Components: main
+Architecture: amd64
 Description: pr-manager APT repository

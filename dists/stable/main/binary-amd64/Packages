@@ -1,0 +1,20 @@
+Package: pr-manager
+Version: 0.2.0-1
+Architecture: amd64
+Homepage: https://github.com/RhizoNymph/pr-manager
+Maintainer: RhizoNymph <82485126+RhizoNymph@users.noreply.github.com>
+Installed-Size: 4198
+Depends: git, libc6 (>= 2.39), tmux
+Priority: optional
+Section: utils
+Filename: pool/main/p/pr-manager/pr-manager_0.2.0-1_amd64.deb
+Size: 1591000
+SHA256: a397b2dd208e2ca5184046936b7268f7148eda9402e10a315b9af5c902e0c64d
+SHA1: 97b103a3d4573b9cc634d75aa3a25e89f5db34f6
+MD5sum: dd83c253b949d76ad00b025b29c65ed2
+Description: Standalone GitHub poller that invokes a coding agent to merge main into pending
+ auto-merge PRs.
+ Watch GitHub repositories for auto-merge pull requests, merge the default
+ branch into stale PRs, and spawn a configured coding agent in tmux when
+ semantic conflicts need attention.
+

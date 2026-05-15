@@ -1,0 +1,19 @@
+Origin: pr-manager
+Label: pr-manager
+Codename: stable
+Date: Fri, 15 May 2026 04:19:09 UTC
+Architectures: amd64
+Components: main
+Description: pr-manager APT repository
+MD5Sum:
+ a1bad7b90d97d6b60eb0c10d26ade4cc 801 main/binary-amd64/Packages
+ c7e9529c28f373f1bf6a2f5194ae12c9 539 main/binary-amd64/Packages.gz
+ 4298f3490f231817edf005d7680b831f 112 main/binary-amd64/Release
+SHA1:
+ 68fff55723e4db78666f3f8cd09c07d3061180a8 801 main/binary-amd64/Packages
+ 9b71e55b00862dba45ac7f377a181e527019b7a4 539 main/binary-amd64/Packages.gz
+ 55f5cb1f5cd75d3c2118b5204cfc1fcd319a148b 112 main/binary-amd64/Release
+SHA256:
+ 025dbbb8ea1ed5f2eb9b1e93ebbc418b02da8abdbee38eb8d9bee826fb6400a6 801 main/binary-amd64/Packages
+ e229a37b11f22534739290c069d437f7408abdffec1a036fab088e4fbdaa297c 539 main/binary-amd64/Packages.gz
+ a8a8ea5140cc653833f0a68b137c4ccbcca68f8055f509284167a8f4321d8539 112 main/binary-amd64/Release
