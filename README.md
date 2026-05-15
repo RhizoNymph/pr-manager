@@ -301,7 +301,8 @@ User-service templates:
 - `pr-manager.service.example` - for a repo checkout built locally with
   `cargo build --release`.
 - `pr-manager.service.binary.example` - for an installed binary, whether it
-  came from `apt` at `/usr/bin/pr-manager` or a downloaded release at
+  came from `apt` at `/usr/bin/pr-manager`, `cargo install` at
+  `~/.cargo/bin/pr-manager`, or a downloaded release at
   `~/.local/bin/pr-manager`.
 
 ```sh
@@ -323,11 +324,11 @@ journalctl --user -u pr-manager -f
 ```
 
 The unit runs as your user (so `claude`/`codex` see your OAuth creds and
-your checkouts), reads tokens from `EnvironmentFile=` (the project's
-`.env`), extends `PATH` so the agent CLI and lockfile resolvers are
-visible, and uses `KillMode=process` so a `systemctl restart` doesn't
-kill the tmux server underneath running agent sessions. See the comments
-in the file for details.
+your checkouts), reads tokens from the configured `EnvironmentFile=`,
+extends `PATH` so the agent CLI and lockfile resolvers are visible, and
+uses `KillMode=process` so a `systemctl restart` doesn't kill the tmux
+server underneath running agent sessions. See the comments in the file
+for details.
 
 ## Layout
 

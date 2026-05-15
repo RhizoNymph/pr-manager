@@ -1,9 +1,12 @@
 # systemd user-service unit for pr-manager installed as a binary.
 #
-# This example assumes pr-manager was installed by a package manager at:
+# This example assumes pr-manager was installed by apt at:
 #   /usr/bin/pr-manager
 #
-# If you downloaded a release binary instead, install it at:
+# If you installed from crates.io, change ExecStart below to:
+#   ExecStart=%h/.cargo/bin/pr-manager --config %h/.config/pr-manager/config.toml
+#
+# If you downloaded a release binary, install it at:
 #   ~/.local/bin/pr-manager
 # and change ExecStart below to:
 #   ExecStart=%h/.local/bin/pr-manager --config %h/.config/pr-manager/config.toml
@@ -45,7 +48,8 @@ Type=simple
 
 # --- replace these three paths with your own -------------------------------
 # Absolute path to the installed pr-manager binary. apt packages normally
-# install here; downloaded release binaries often live at %h/.local/bin.
+# install here; cargo install uses %h/.cargo/bin, and downloaded release
+# binaries often live at %h/.local/bin.
 ExecStart=/usr/bin/pr-manager --config %h/.config/pr-manager/config.toml
 
 # EnvironmentFile is parsed as KEY=VALUE per line. systemd does NOT do shell
