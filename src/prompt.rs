@@ -4,8 +4,6 @@ pub fn build_prompt(repo: &RepoConfig, event: &PrEvent) -> String {
     let pr = &event.pr;
     let main_sha = &event.main_sha;
     let recent = &event.recent;
-    let wt_base = repo.worktree_base.to_string_lossy();
-    let wt = format!("{wt_base}/pr-{}", pr.number);
     let recent_list = if recent.is_empty() {
         "(none)".to_string()
     } else {
@@ -51,42 +49,10 @@ Event metadata:\n\
   main_sha:      {main_sha}\n\
   recent_merges: {recent_list}\n\
 \n\
-ALL git work happens in a dedicated, pr-manager-owned worktree at:\n\
-\n\
-  {wt}\n\
-\n\
-This path is outside the user's repository. The user's existing worktrees,\n\
-working tree, and current branch are NEVER touched. If a previous attempt\n\
-left a worktree at that path, drop it before proceeding.\n\
-\n\
-Recipe (run from any cwd inside the user's repo; pr-manager has already\n\
-run `git fetch origin --prune` in the user's repo for you, so origin/<branch>\n\
-refs are current):\n\
-\n\
-  WT=\"{wt}\"\n\
-  mkdir -p \"$(dirname \"$WT\")\"\n\
-\n\
-  # If a previous attempt left a worktree at $WT, drop it. This path is\n\
-  # owned by pr-manager — it is NEVER a user-managed worktree.\n\
-  if git worktree list --porcelain | grep -qx \"worktree $WT\"; then\n\
-    git worktree remove --force \"$WT\"\n\
-  elif [ -e \"$WT\" ]; then\n\
-    rm -rf \"$WT\"\n\
-  fi\n\
-\n\
-  # Detached HEAD on the PR's current head SHA. Detached avoids colliding\n\
-  # with any other worktree (including the user's) that may already have\n\
-  # the PR branch checked out.\n\
-  git worktree add --detach \"$WT\" \"origin/{head_branch}\"\n\
-\n\
-  cd \"$WT\"\n\
-  git merge \"origin/{base_branch}\" --no-edit\n\
-\n\
-If git merge succeeds with no conflicts:\n\
-  git push origin \"HEAD:{head_branch}\"\n\
-  cd -\n\
-  git worktree remove \"$WT\"\n\
-  Done.\n\
+You are already running in the prepared repository directory for this PR.\n\
+pr-manager has already run `git fetch origin --prune` and attempted\n\
+`git merge origin/{base_branch} --no-edit` before invoking you. Start by\n\
+running `git status` and inspecting the current state.\n\
 \n\
 If git merge reports conflicts, decide whether the resolution is OBVIOUS:\n\
 \n\
@@ -116,27 +82,21 @@ For OBVIOUS conflicts:\n\
     git add -A\n\
     git commit --no-edit\n\
     git push origin \"HEAD:{head_branch}\"\n\
-    cd -\n\
-    git worktree remove \"$WT\"\n\
+\n\
+If there are no conflicts and the merge commit already exists, push it:\n\
+    git push origin \"HEAD:{head_branch}\"\n\
 \n\
 For AMBIGUOUS conflicts:\n\
-    git merge --abort\n\
-    cd -\n\
-    git worktree remove \"$WT\"\n\
   Do NOT push. Print a clear summary naming each conflicted file and\n\
   explaining what is ambiguous, so the user can take over.\n\
 \n\
 Hard rules:\n\
-  * NEVER run git checkout, git switch, or git reset in the user's cwd.\n\
-    All branch-changing work happens inside $WT.\n\
+  * Work only in the current repository directory.\n\
+  * Do not change branches.\n\
   * NEVER push to {base_branch}. Only push to \"HEAD:{head_branch}\".\n\
   * NEVER force-push.\n\
-  * \"git worktree remove --force\" is only safe on $WT because that path\n\
-    is in pr-manager's cache, not in the user's repo. Do NOT use it on\n\
-    any other path.\n\
-  * If the worktree add or any of the recipe's git commands fails for a\n\
-    reason you don't understand (network errors, ref-already-locked,\n\
-    etc.), abort cleanly and explain why — don't improvise.\n\
+  * If a git command fails for a reason you don't understand (network errors,\n\
+    ref-already-locked, etc.), abort cleanly and explain why; don't improvise.\n\
 \n\
 When done (success or abort), print a one-line summary on the last line so\n\
 it is easy to scan in logs. Examples:\n\
@@ -151,7 +111,6 @@ it is easy to scan in logs. Examples:\n\
         base_branch = pr.base_branch,
         main_sha = main_sha,
         recent_list = recent_list,
-        wt = wt,
     );
 
     template

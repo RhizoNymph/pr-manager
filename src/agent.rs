@@ -6,6 +6,7 @@ use anyhow::Context;
 use thiserror::Error;
 use tokio::sync::Mutex;
 
+use crate::merger::cleanup_worktree_path;
 use crate::tmux::{has_session, kill_session, new_detached_session, NewSessionArgs, TmuxError};
 use crate::types::{AuthMode, PrEvent, RepoConfig, RepoId};
 
@@ -18,6 +19,9 @@ pub struct ActiveSession {
     #[allow(dead_code)]
     pub main_sha: String,
     pub prompt_file: PathBuf,
+    pub repo_path: PathBuf,
+    pub worktree_base: PathBuf,
+    pub worktree_path: PathBuf,
     /// Per-invocation log capturing the agent's stdout+stderr plus a trailing
     /// `EXIT: <n>` line. Persistent — kept on close/sweep/shutdown so failed
     /// runs can be inspected after the tmux session is gone.
@@ -68,6 +72,7 @@ impl AgentRunner {
         repo: &RepoConfig,
         event: &PrEvent,
         prompt: &str,
+        worktree_path: PathBuf,
     ) -> Result<(), SpawnError> {
         let name = session_name_for_pr(&repo.repo_id, event.pr.number);
 
@@ -85,14 +90,17 @@ impl AgentRunner {
             now_ms
         ));
 
-        write_prompt_file(&prompt_file, prompt)
-            .map_err(|e| SpawnError::PromptWrite(e.to_string()))?;
+        if let Err(e) = write_prompt_file(&prompt_file, prompt) {
+            cleanup_worktree_path(&repo.repo_path, &repo.worktree_base, &worktree_path).await;
+            return Err(SpawnError::PromptWrite(e.to_string()));
+        }
 
         let log_file = repo
             .logs_base
             .join(format!("pr-{}-{}.log", event.pr.number, now_ms));
         if let Err(e) = std::fs::create_dir_all(&repo.logs_base) {
             drop_prompt_file(&prompt_file);
+            cleanup_worktree_path(&repo.repo_path, &repo.worktree_base, &worktree_path).await;
             return Err(SpawnError::LogSetup(format!(
                 "create {}: {}",
                 repo.logs_base.display(),
@@ -103,13 +111,14 @@ impl AgentRunner {
         let command = build_shell_command(repo, &prompt_file, &log_file);
         let res = new_detached_session(NewSessionArgs {
             name: &name,
-            cwd: &repo.repo_path,
+            cwd: &worktree_path,
             command: &command,
         })
         .await;
 
         if let Err(e) = res {
             drop_prompt_file(&prompt_file);
+            cleanup_worktree_path(&repo.repo_path, &repo.worktree_base, &worktree_path).await;
             return Err(SpawnError::Tmux(e));
         }
 
@@ -120,6 +129,9 @@ impl AgentRunner {
             spawn_head_sha: event.pr.head_sha.clone(),
             main_sha: event.main_sha.clone(),
             prompt_file: prompt_file.clone(),
+            repo_path: repo.repo_path.clone(),
+            worktree_base: repo.worktree_base.clone(),
+            worktree_path: worktree_path.clone(),
             log_file: log_file.clone(),
             started_at_ms: now_ms,
             agent_name: repo.agent.name.clone(),
@@ -136,7 +148,7 @@ impl AgentRunner {
             session = %name,
             agent = %repo.agent.name,
             attach = %format!("tmux attach -t {name}"),
-            repo_path = %repo.repo_path.display(),
+            cwd = %worktree_path.display(),
             log_file = %log_file.display(),
             command = %command,
             "spawned agent session in tmux"
@@ -158,6 +170,7 @@ impl AgentRunner {
         };
         kill_session(&sess.session_name).await;
         drop_prompt_file(&sess.prompt_file);
+        cleanup_worktree_path(&sess.repo_path, &sess.worktree_base, &sess.worktree_path).await;
         tracing::info!(
             repo = %repo_id.as_str(),
             pr = pr_number,
@@ -188,6 +201,12 @@ impl AgentRunner {
                 .remove(&(sess.repo_id.clone(), sess.pr_number));
             if let Some(removed) = removed {
                 drop_prompt_file(&removed.prompt_file);
+                cleanup_worktree_path(
+                    &removed.repo_path,
+                    &removed.worktree_base,
+                    &removed.worktree_path,
+                )
+                .await;
                 exited.push((removed.repo_id.clone(), removed.pr_number));
                 let now_ms = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -220,6 +239,7 @@ impl AgentRunner {
         for sess in drained {
             kill_session(&sess.session_name).await;
             drop_prompt_file(&sess.prompt_file);
+            cleanup_worktree_path(&sess.repo_path, &sess.worktree_base, &sess.worktree_path).await;
             tracing::info!(
                 repo = %sess.repo_id.as_str(),
                 pr = sess.pr_number,

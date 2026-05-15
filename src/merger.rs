@@ -7,9 +7,9 @@
 //!      package manager, commit, push.
 //!
 //! Anything else (real semantic conflicts, missing package manager, push
-//! rejection, unexpected git error) returns [`MergeOutcome::NeedsAgent`] and
-//! the caller spawns the agent as before. The merger always cleans up its
-//! worktree before returning so the agent starts from a fresh slate.
+//! rejection, unexpected git error) returns [`MergeOutcome::NeedsAgent`].
+//! When a worktree was created successfully, the caller spawns the agent in
+//! that same worktree and owns cleanup after the agent exits.
 //!
 //! The merger trusts that the caller has already run
 //! `git fetch origin --prune` in `repo_path` this tick, so `origin/<branch>`
@@ -29,9 +29,13 @@ pub enum MergeOutcome {
     /// All conflicts were lockfiles; regenerated, committed, pushed, worktree
     /// removed. Skip the agent. Lockfile paths are repo-relative.
     PushedAfterLockfile { lockfiles: Vec<String> },
-    /// Native attempt could not finish; worktree has been cleaned up. Caller
-    /// should spawn the agent.
-    NeedsAgent { reason: NeedsAgentReason },
+    /// Native attempt could not finish. When `worktree_path` is present, it
+    /// points at the prepared per-PR worktree the agent should run in. When it
+    /// is absent, setup failed before an isolated worktree was available.
+    NeedsAgent {
+        reason: NeedsAgentReason,
+        worktree_path: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug)]
@@ -120,6 +124,7 @@ pub async fn try_native_merge(repo: &RepoConfig, pr: &OpenAutoMergePr) -> MergeO
     if let Err(e) = validate_worktree_path(&repo.worktree_base, &wt) {
         return MergeOutcome::NeedsAgent {
             reason: NeedsAgentReason::Other(format!("unsafe worktree path: {e}")),
+            worktree_path: None,
         };
     }
 
@@ -127,6 +132,7 @@ pub async fn try_native_merge(repo: &RepoConfig, pr: &OpenAutoMergePr) -> MergeO
     {
         return MergeOutcome::NeedsAgent {
             reason: NeedsAgentReason::Other(format!("worktree setup: {e}")),
+            worktree_path: None,
         };
     }
 
@@ -134,9 +140,9 @@ pub async fn try_native_merge(repo: &RepoConfig, pr: &OpenAutoMergePr) -> MergeO
     let merge_out = match git_capture(&wt, &["merge", &merge_target, "--no-edit"]).await {
         Ok(o) => o,
         Err(e) => {
-            cleanup_worktree(&repo.repo_path, &repo.worktree_base, &wt).await;
             return MergeOutcome::NeedsAgent {
                 reason: NeedsAgentReason::Other(format!("git merge spawn: {e}")),
+                worktree_path: Some(wt),
             };
         }
     };
@@ -160,12 +166,11 @@ pub async fn try_native_merge(repo: &RepoConfig, pr: &OpenAutoMergePr) -> MergeO
         let stderr = String::from_utf8_lossy(&merge_out.stderr)
             .trim()
             .to_string();
-        let _ = git_capture(&wt, &["merge", "--abort"]).await;
-        cleanup_worktree(&repo.repo_path, &repo.worktree_base, &wt).await;
         return MergeOutcome::NeedsAgent {
             reason: NeedsAgentReason::Other(format!(
                 "git merge failed without conflicts: {stderr}"
             )),
+            worktree_path: Some(wt),
         };
     }
 
@@ -175,39 +180,40 @@ pub async fn try_native_merge(repo: &RepoConfig, pr: &OpenAutoMergePr) -> MergeO
         .cloned()
         .collect();
     if !unrecognized.is_empty() {
-        let _ = git_capture(&wt, &["merge", "--abort"]).await;
-        cleanup_worktree(&repo.repo_path, &repo.worktree_base, &wt).await;
         return MergeOutcome::NeedsAgent {
             reason: NeedsAgentReason::SemanticConflicts { files: conflicts },
+            worktree_path: Some(wt),
         };
     }
 
     for rel in &conflicts {
         let kind = Lockfile::detect(rel).expect("filtered above");
         if let Err(detail) = resolve_lockfile(&wt, rel, kind).await {
-            let _ = git_capture(&wt, &["merge", "--abort"]).await;
-            cleanup_worktree(&repo.repo_path, &repo.worktree_base, &wt).await;
+            let restore_detail = restore_merge_conflicts(&wt, &pr.base_branch)
+                .await
+                .err()
+                .map(|e| format!("; failed to restore conflict state: {e}"))
+                .unwrap_or_default();
             return MergeOutcome::NeedsAgent {
                 reason: NeedsAgentReason::LockfileResolverFailed {
                     lockfile: rel.clone(),
-                    detail,
+                    detail: format!("{detail}{restore_detail}"),
                 },
+                worktree_path: Some(wt),
             };
         }
     }
 
     if let Err(e) = git_check(&wt, &["add", "-A"]).await {
-        let _ = git_capture(&wt, &["merge", "--abort"]).await;
-        cleanup_worktree(&repo.repo_path, &repo.worktree_base, &wt).await;
         return MergeOutcome::NeedsAgent {
             reason: NeedsAgentReason::Other(format!("git add after lockfile resolve: {e}")),
+            worktree_path: Some(wt),
         };
     }
     if let Err(e) = git_check(&wt, &["commit", "--no-edit"]).await {
-        let _ = git_capture(&wt, &["merge", "--abort"]).await;
-        cleanup_worktree(&repo.repo_path, &repo.worktree_base, &wt).await;
         return MergeOutcome::NeedsAgent {
             reason: NeedsAgentReason::Other(format!("git commit after lockfile resolve: {e}")),
+            worktree_path: Some(wt),
         };
     }
 
@@ -232,9 +238,9 @@ async fn finalize_push(
 ) -> MergeOutcome {
     let push_spec = format!("HEAD:{head_branch}");
     if let Err(e) = git_check(wt, &["push", "origin", &push_spec]).await {
-        cleanup_worktree(repo_path, worktree_base, wt).await;
         return MergeOutcome::NeedsAgent {
             reason: NeedsAgentReason::Other(format!("git push: {e}")),
+            worktree_path: Some(wt.to_path_buf()),
         };
     }
     cleanup_worktree(repo_path, worktree_base, wt).await;
@@ -288,6 +294,10 @@ async fn setup_worktree(
     Ok(())
 }
 
+pub async fn cleanup_worktree_path(repo_path: &Path, worktree_base: &Path, wt: &Path) {
+    cleanup_worktree(repo_path, worktree_base, wt).await;
+}
+
 async fn cleanup_worktree(repo_path: &Path, worktree_base: &Path, wt: &Path) {
     if let Err(err) = validate_worktree_path(worktree_base, wt) {
         tracing::warn!(err = %err, "refusing to clean unsafe worktree path");
@@ -310,6 +320,22 @@ async fn cleanup_worktree(repo_path: &Path, worktree_base: &Path, wt: &Path) {
     if let Err(err) = remove_stale_worktree_path(worktree_base, wt) {
         tracing::warn!(err = %err, "failed to remove stale pr-manager worktree path");
     }
+}
+
+async fn restore_merge_conflicts(wt: &Path, base_branch: &str) -> Result<(), String> {
+    let abort = git_capture(wt, &["merge", "--abort"]).await?;
+    if !abort.status.success() {
+        return Err(format!(
+            "git merge --abort (exit {}): {}",
+            abort.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&abort.stderr).trim()
+        ));
+    }
+
+    let merge_target = format!("origin/{base_branch}");
+    git_capture(wt, &["merge", &merge_target, "--no-edit"])
+        .await
+        .map(|_| ())
 }
 
 async fn known_worktree(repo_path: &Path, wt: &Path) -> bool {

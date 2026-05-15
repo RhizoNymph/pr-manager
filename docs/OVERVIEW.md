@@ -38,8 +38,9 @@ Overview:
       `uv lock`)
       from the lockfile's directory, then commits and pushes. Anything
       else (semantic conflicts, missing/failed resolver, push rejection)
-      is reported as NeedsAgent; the worktree is fully cleaned up so the
-      agent starts from scratch.
+      is reported as NeedsAgent with the prepared worktree path when setup
+      succeeded; the agent continues in that same directory and the runner
+      cleans it up after the session ends.
     github_client: >
       Thin HTTP wrapper around the GitHub REST API (commits, pulls, list
       closed-merged) using reqwest. One client per repo, each holding its
@@ -49,15 +50,17 @@ Overview:
       keyed on (RepoId, pr_number). spawn(repo, event, prompt) writes
       the prompt to a tempfile and starts a detached tmux session named
       `pr-manager-<repo_id>-pr-<n>` running the configured agent command
-      with cwd = repo.repo_path; agent stdout+stderr is redirected to a
-      persistent log file under the repo's logsBase with a trailing
-      `EXIT: <code>` line so success/failure is recoverable after the
-      session exits. sweep() drops registry entries whose tmux session
-      no longer exists and reports the captured exit code.
-      close(repo_id, pr_number) force-kills a single session.
+      with cwd = the prepared per-PR worktree; agent stdout+stderr is
+      redirected to a persistent log file under the repo's logsBase with
+      a trailing `EXIT: <code>` line so success/failure is recoverable
+      after the session exits. sweep() drops registry entries whose tmux
+      session no longer exists, cleans up the worktree, and reports the
+      captured exit code.
+      close(repo_id, pr_number) force-kills a single session and cleans
+      up its worktree.
       active_for_repo(repo_id) snapshots that repo's sessions for the
       poller's reconcile pass. shutdown() kills all sessions across
-      every repo.
+      every repo and cleans up their worktrees.
     tmux: >
       Thin wrapper around the `tmux` CLI: -V (availability check),
       has-session, kill-session, new-session -d. Uses `=name` target
@@ -72,8 +75,8 @@ Overview:
       packed-refs locks.
     prompt: >
       Per-event prompt builder. Substitutes pr_number, head_branch,
-      main_branch, head_sha, main_sha, recent_merges, and the per-PR
-      worktree path directly into the instructions the agent sees.
+      main_branch, head_sha, main_sha, and recent_merges into the
+      instructions the agent sees.
     config: >
       Hand-rolled validated TOML loader. Resolves the config file in
       this order: --config <path> flag, PR_MANAGER_CONFIG env var,
@@ -120,11 +123,9 @@ Overview:
     new (pr#, head_sha, main_sha) triple the poller calls the merger
     fast-path. On Pushed / PushedAfterLockfile the triple is recorded as
     seen and no agent runs. On NeedsAgent the poller falls through to
-    runner.spawn(repo, event, prompt), which starts a tmux session
-    running the configured agent against a tempfile prompt; the agent
-    does its git/gh work inside repo.repo_path via the same per-PR
-    worktree path under pr-manager's cache (the merger has already
-    cleaned it up). When the merger or agent pushes the merge, the next
+    runner.spawn(repo, event, prompt, worktree_path), which starts a tmux
+    session in the prepared per-PR worktree and feeds the configured agent
+    a tempfile prompt. When the merger or agent pushes the merge, the next
     poll for that repo sees the head_sha advance and (for agent
     sessions) force-closes the session.
 

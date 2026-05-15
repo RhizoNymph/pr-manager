@@ -145,16 +145,17 @@ For each watched repo, a dedicated task ticks every `poll_interval_seconds`
    via the matching package manager, then committed and pushed. The triple is
    recorded as seen and no agent runs.
 6. If the merger reports `NeedsAgent` (semantic conflicts, missing/failed
-   resolver, push rejection), the worktree is cleaned up and pr-manager writes
-   the prompt to a tempfile and spawns a tmux session named
-   `pr-manager-<owner>__<repo>-pr-<n>` with `cwd = repo_path`.
+   resolver, push rejection), pr-manager keeps the prepared worktree, writes
+   the prompt to a tempfile, and spawns a tmux session named
+   `pr-manager-<owner>__<repo>-pr-<n>` with `cwd` set to that worktree.
 
 Sessions run in parallel both within a repo and across repos. Each PR uses its
 own throwaway worktree under
 `${XDG_CACHE_HOME:-~/.cache}/pr-manager/<owner>__<repo>/wt/pr-<n>` - never
 inside your checkout - so forced cleanup only targets pr-manager-owned paths.
-The merger uses the same per-PR worktree path and cleans it up before handing
-off to the agent, so the agent always starts from a fresh slate.
+The native merger and agent use the same per-PR worktree. pr-manager removes
+it from both the filesystem and Git's worktree list when the agent exits, is
+force-closed, or the process shuts down.
 
 ## Watching a session
 

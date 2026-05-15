@@ -84,11 +84,11 @@ user's terminal
         │                      ├─ Pushed                  -> mark seen, continue
         │                      ├─ PushedAfterLockfile     -> mark seen, continue
         │                      └─ NeedsAgent              -> fall through:
-        │                           runner.spawn(repo, event, prompt)
+        │                           runner.spawn(repo, event, prompt, worktree_path)
         │                             ├─ writes prompt -> tempfile
         │                             └─ tmux new-session -d
         │                                  -s pr-manager-<repo_id>-pr-N
-        │                                  -c repo.repo_path
+        │                                  -c <worktree_path>
         │                                  "<agent command> < tempfile"
         └─ user can attach: tmux attach -t pr-manager-<repo_id>-pr-N
 ```
@@ -114,7 +114,10 @@ Per-repo poller loop (every `poll_interval_seconds`, default 60s):
 7. For each open auto-merge PR, key = `${pr.number}:${pr.head.sha}:${mainSha}`.
    If key already in this repo's `seen` set, skip. Else call `try_native_merge`:
    - `Pushed` / `PushedAfterLockfile` -> add key to `seen`, no agent spawn.
-   - `NeedsAgent` -> emit, add key to `seen`, spawn the agent.
+   - `NeedsAgent` with a prepared worktree -> emit, add key to `seen`, spawn
+     the agent in that worktree.
+   - `NeedsAgent` without a prepared worktree -> log and skip agent spawn for
+     that event.
 8. `lastMainSha = mainSha`.
 
 Each repo's `seen` set is bounded to the last 200 keys (FIFO).
@@ -136,8 +139,9 @@ For each `(pr, head_sha, main_sha)` triple, given a `&RepoConfig`:
 4. **Clean merge**: `git push origin HEAD:<head_branch>`,
    `git worktree remove --force $wt`, return `Pushed`.
 5. **Conflict**: list with `git diff --name-only --diff-filter=U`.
-   - If any conflicted file is not a recognized lockfile: `git merge --abort`,
-     remove the worktree, return `NeedsAgent { SemanticConflicts { files } }`.
+   - If any conflicted file is not a recognized lockfile: leave the conflicted
+     merge in place and return
+     `NeedsAgent { SemanticConflicts { files }, worktree_path: Some($wt) }`.
    - Else, for each conflicted lockfile: delete the file, then run the
      matching package manager from the lockfile's directory:
      | Lockfile basename   | Resolver                                                |
@@ -148,14 +152,15 @@ For each `(pr, head_sha, main_sha)` triple, given a `&RepoConfig`:
      | `Cargo.lock`        | `cargo generate-lockfile`                               |
      | `poetry.lock`       | `poetry lock`                                           |
      | `uv.lock`           | `uv lock`                                               |
-     If any resolver exits non-zero or the file is not produced: abort,
-     remove the worktree, return
-     `NeedsAgent { LockfileResolverFailed { lockfile, detail } }`.
+     If any resolver exits non-zero or the file is not produced: restore the
+     merge conflict state when possible and return
+     `NeedsAgent { LockfileResolverFailed { lockfile, detail }, worktree_path: Some($wt) }`.
    - On success: `git add -A`, `git commit --no-edit`,
      `git push origin HEAD:<head_branch>`, `git worktree remove --force $wt`,
      return `PushedAfterLockfile { lockfiles }`.
-6. **Push rejection / unexpected error** at any step: clean up worktree,
-   return `NeedsAgent { Other(detail) }`.
+6. **Push rejection / unexpected error** after setup: leave the worktree for
+   the agent and return `NeedsAgent { Other(detail), worktree_path: Some($wt) }`.
+   If setup failed before a safe worktree exists, return `worktree_path: None`.
 
 Lockfile detection is by basename only (`Path::file_name`), so monorepo
 paths like `packages/web/pnpm-lock.yaml` and `crates/core/Cargo.lock` are
@@ -168,11 +173,10 @@ sides' dependency changes. Cargo's `generate-lockfile` may bump unrelated
 deps within their version constraints; for an auto-merge into a feature
 branch this is acceptable.
 
-The agent never sees the merger's worktree state — every `NeedsAgent`
-path removes the worktree first. The agent's prompt recipe re-creates it
-from scratch using the same path, and the prompt explicitly notes that
-the fast-path was already attempted so any conflicts the agent observes
-are genuinely semantic.
+The agent continues from the merger's prepared state. It starts with
+`cwd = $wt`, inspects `git status`, resolves obvious conflicts or reports
+ambiguous ones, and never creates or removes worktrees itself. The runner
+removes `$wt` after natural exit, force-close, or shutdown.
 
 ## Agent harnesses
 
@@ -242,13 +246,13 @@ where the repo slug is sanitized via `RepoId::for_tmux()` (alphanumeric +
 `_`/`-` only). The repo prefix prevents collisions when one process
 watches multiple repos.
 
-On `runner.spawn(repo, event, prompt)`:
+On `runner.spawn(repo, event, prompt, worktree_path)`:
 1. Any existing session with that exact name is killed first
    (`tmux kill-session -t =pr-manager-<repo_id>-pr-<n>`) to defend against
    stale sessions from a prior crash. The `=` prefix forces exact-match.
 2. The prompt is written to
    `${TMPDIR}/pr-manager-<repo_id>-pr-<n>-<ms>.prompt` with mode 0600.
-3. `tmux new-session -d -s pr-manager-<repo_id>-pr-<n> -c repo.repo_path
+3. `tmux new-session -d -s pr-manager-<repo_id>-pr-<n> -c <worktree_path>
    "<cmd>"` is invoked, where `<cmd>` is the provider command plus
    `< <promptFile>`, with each token POSIX-quoted.
 
@@ -305,12 +309,14 @@ of truth. Two distinct close paths:
 - **Natural exit.** The agent pushes the merge and exits cleanly; tmux closes
   the session because there is nothing left to run in the pane. The next
   `runner.sweep()` (any repo's tick will trigger one) notices the session is
-  gone and removes the registry entry.
+  gone, removes the registry entry, deletes the prompt tempfile, and removes
+  the worktree.
 - **Force-close.** The repo's poller observes that the PR's `head.sha` has
   advanced past `spawnHeadSha`, or the PR has left the open auto-merge list.
-  The runner kills the tmux session and deletes the prompt tempfile.
+  The runner kills the tmux session, deletes the prompt tempfile, and removes
+  the worktree.
 
-Either way, the prompt tempfile is cleaned up.
+Either way, the prompt tempfile and per-PR worktree are cleaned up.
 
 ## Files
 
@@ -340,16 +346,15 @@ Either way, the prompt tempfile is cleaned up.
   `.git`.
 - `src/merger.rs` - native fast-path. `try_native_merge(repo, pr)`
   returns `MergeOutcome::{Pushed, PushedAfterLockfile, NeedsAgent}`.
-  Owns the per-PR worktree lifecycle for its own attempt; always cleans
-  up before returning so the agent (when invoked) starts fresh.
+  Cleans up after native pushes. For agent handoff, returns the prepared
+  per-PR worktree path.
 - `src/log.rs` - structured-JSON logger to stderr (tracing-subscriber).
 
 ## Worktree-isolated merge flow
 
 pr-manager owns a dedicated cache directory outside any user repository, and
 every throwaway worktree lives there — used both by the native merger and
-by the spawned agent. The base is computed at startup per repo and embedded
-in the prompt:
+by the spawned agent. The base is computed at startup per repo:
 
 ```text
 ${cache_root or XDG_CACHE_HOME or $HOME/.cache}/pr-manager/<owner>__<name>/wt
@@ -357,8 +362,9 @@ ${cache_root or XDG_CACHE_HOME or $HOME/.cache}/pr-manager/<owner>__<name>/wt
 
 Per-PR worktree path: `${repo.worktree_base}/pr-<n>`. Because `$WT` is
 always under pr-manager's cache and never inside any user repo, `--force`
-operations on it cannot affect the user's worktrees. The prompt
-explicitly forbids running `--force` on any other path.
+operations on it cannot affect the user's worktrees. The agent runs with
+`cwd = $WT`; pr-manager removes `$WT` from the filesystem and Git's worktree
+list after the tmux session ends or is force-closed.
 
 ### Limitations
 
@@ -382,11 +388,9 @@ cross-process collisions, run one pr-manager per host per repo.
   emitted.
 - Dedup key (per repo) includes `pr.head.sha` so a PR that gets new
   commits after a merge re-fires on the next main change.
-- Each repo's agent runs with `cwd = repo.repo_path`. The user's
-  working tree there is never the target of merge work; the prompt
-  directs all branch changes into `${repo.worktree_base}/pr-<n>`. The
-  native merger uses the same path and the same `--force` discipline
-  (only on paths under `repo.worktree_base`).
+- Each repo's agent runs with `cwd = ${repo.worktree_base}/pr-<n>`. The
+  user's configured `repo_path` is used as the stable Git control checkout for
+  fetches and worktree operations, but it is never the target of merge work.
 - Fork PRs are filtered at the poller.
 - Prompt tempfiles live in `os.tmpdir()` with mode 0600 and are removed
   on close/sweep/shutdown.

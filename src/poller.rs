@@ -199,10 +199,10 @@ async fn tick(
         }
 
         // Try the native fast path first: clean merges and lockfile-only
-        // conflicts get pushed without paying for an agent. The merger always
-        // cleans up its worktree before returning, so the agent (if needed)
-        // starts from the same fresh state it always has.
-        match try_native_merge(repo, pr).await {
+        // conflicts get pushed without paying for an agent. When the merger
+        // needs agent help after creating the per-PR worktree, the agent runs
+        // in that same prepared directory and the runner owns cleanup.
+        let worktree_path = match try_native_merge(repo, pr).await {
             MergeOutcome::Pushed => {
                 remember(seen_queue, seen_set, key);
                 tracing::info!(
@@ -226,10 +226,24 @@ async fn tick(
                 );
                 continue;
             }
-            MergeOutcome::NeedsAgent { reason } => {
+            MergeOutcome::NeedsAgent {
+                reason,
+                worktree_path,
+            } => {
                 log_needs_agent(repo, pr.number, &reason);
+                match worktree_path {
+                    Some(path) => path,
+                    None => {
+                        tracing::error!(
+                            repo = %repo.github_repo,
+                            pr = pr.number,
+                            "not spawning agent because no prepared worktree is available"
+                        );
+                        continue;
+                    }
+                }
             }
-        }
+        };
 
         let event = PrEvent {
             pr: pr.clone(),
@@ -238,7 +252,7 @@ async fn tick(
         };
         let prompt = build_prompt(repo, &event);
 
-        match runner.spawn(repo, &event, &prompt).await {
+        match runner.spawn(repo, &event, &prompt, worktree_path).await {
             Ok(()) => {
                 remember(seen_queue, seen_set, key);
                 tracing::info!(
