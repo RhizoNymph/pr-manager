@@ -1,14 +1,17 @@
 # pr-manager
 
 Standalone poller that watches one or more GitHub repos and, whenever a default
-branch advances, tries to merge `main` into each open auto-merge PR. A native
-fast-path handles clean merges and lockfile-only conflicts (regenerated via the
-matching package manager) and pushes the result without spawning an agent. PRs
-that hit real semantic conflicts fall through to a detached **tmux session**
-per PR running a configured coding agent. Each agent session is auto-closed as
-soon as the PR's head SHA advances past what we spawned against, or the PR
-leaves the open auto-merge list. Conflicts that are not obvious are escalated
-to the user instead of being guessed at.
+branch advances, tries to merge `main` into each **managed** PR. By default the
+managed set is exactly the open PRs with GitHub auto-merge armed; PRs without
+auto-merge can opt in per-PR with a label or per-repo with a flag (see
+[Which PRs get managed](#which-prs-get-managed)). A native fast-path handles
+clean merges and lockfile-only conflicts (regenerated via the matching package
+manager) and pushes the result without spawning an agent. PRs that hit real
+semantic conflicts fall through to a detached **tmux session** per PR running a
+configured coding agent. Each agent session is auto-closed as soon as the PR's
+head SHA advances past what we spawned against, or the PR stops being managed.
+Conflicts that are not obvious are escalated to the user instead of being
+guessed at.
 
 No webhooks, no MCP, and no interactive chat session required - just a
 long-running process plus `tmux` and a supported agent CLI on PATH.
@@ -160,12 +163,14 @@ For each watched repo, a dedicated task ticks every `poll_interval_seconds`
 (default 60s):
 
 1. Fetch the default-branch HEAD SHA.
-2. List open PRs with `auto_merge != null` (fork PRs are filtered).
+2. List open PRs (fork PRs are filtered), then narrow to the managed set:
+   the `pr_authors` allowlist first, then the repo's management scope
+   (auto-merge, opt-in label, or all open PRs).
 3. Reconcile this repo's active tmux sessions:
    - Sweep registry entries whose tmux session is gone.
    - Force-close any session whose PR head SHA advanced, or whose PR is no
-     longer in the open auto-merge list.
-4. If main advanced this tick and there is at least one open PR, run
+     longer managed (closed, auto-merge disarmed, opt-in label removed).
+4. If main advanced this tick and there is at least one managed PR, run
    `git fetch origin --prune` once in the repo's `repo_path` so the merger and
    any subsequent agents see current `origin/<branch>` refs without racing
    each other on `.git` locks. If that fetch fails, defer spawns to the next
@@ -189,6 +194,56 @@ inside your checkout - so forced cleanup only targets pr-manager-owned paths.
 The native merger and agent use the same per-PR worktree. pr-manager removes
 it from both the filesystem and Git's worktree list when the agent exits, is
 force-closed, or the process shuts down.
+
+## Which PRs get managed
+
+"Managed" means pr-manager will merge the default branch into that PR's head
+branch when main advances — and, on a real conflict, spend an agent run on it.
+Two per-repo keys widen the default:
+
+| Config | Managed set |
+| ------ | ----------- |
+| *(neither key set)* | Open PRs with `auto_merge != null`. **Default.** |
+| `manage_label = "pr-manager"` | Auto-merge PRs, **plus** any open PR carrying that label. |
+| `manage_all_prs = true` | Every open PR, auto-merge or not. |
+
+`manage_all_prs` is an override: when it is true, `manage_label` is ignored.
+Setting `manage_all_prs = false` on a repo overrides a `[defaults]` value of
+true and falls back to label matching if `manage_label` is set.
+
+```toml
+[defaults]
+manage_label = "pr-manager"   # label opt-in for every repo
+
+[[repos]]
+github_repo = "acme/widgets"
+repo_path = "/home/me/code/acme/widgets"
+# inherits the label opt-in
+
+[[repos]]
+github_repo = "acme/sprockets"
+repo_path = "/home/me/code/acme/sprockets"
+manage_all_prs = true         # this repo: manage everything
+```
+
+Notes:
+
+- Label matching is case-insensitive, so `PR-Manager` matches `pr-manager`.
+- Opting in is reversible from the GitHub UI: remove the label and the PR
+  drops out of the managed set on the next tick. Any agent session already
+  running for it is force-closed.
+- Opted-in PRs get the identical pipeline to auto-merge PRs — native
+  fast-path, then an agent in tmux for semantic conflicts. On a busy repo,
+  `manage_all_prs = true` can therefore mean many concurrent agent sessions;
+  pair it with `pr_authors` to scope it.
+- `pr_authors` is applied **before** the scope, so an allowlist always wins:
+  a labeled PR from an author outside the allowlist is still ignored.
+- Every merge and spawn log line carries `managed_reason`
+  (`auto_merge` / `opt_in_label` / `repo_opt_in`) so you can tell why a PR was
+  touched. The startup line per repo carries `managed_scope`.
+- The prompt is aware of the difference: an auto-merge PR is told auto-merge
+  will take over once the branch is current, while an opted-in PR is told the
+  branch just has to end up up-to-date.
 
 ## Watching a session
 
@@ -246,8 +301,12 @@ claude_extra_args = "--permission-mode bypassPermissions"
 # cache_root = "/abs/path"   # defaults to $XDG_CACHE_HOME or ~/.cache
 # pr_authors = ["alice", "renovate[bot]"]
 #   Restrict to PRs from these author logins (case-insensitive). Unset or
-#   [] = process every open auto-merge PR. Lets two operators run
-#   pr-manager against the same repo without stepping on each other.
+#   [] = process every managed PR. Lets two operators run pr-manager
+#   against the same repo without stepping on each other.
+# manage_label = "pr-manager"
+#   Opt individual non-auto-merge PRs in by labeling them (case-insensitive).
+# manage_all_prs = false
+#   true = manage every open PR, auto-merge or not. Overrides manage_label.
 
 [[repos]]
 github_repo = "owner/repo1"
@@ -256,6 +315,8 @@ repo_path = "/abs/path/1"
 # token_env = "GITHUB_TOKEN_REPO1"
 # agent = "codex"
 # pr_authors = ["alice"]   # replaces (not merges with) the default list
+# manage_label = "automerge-me"
+# manage_all_prs = true
 
 [[repos]]
 github_repo = "owner/repo2"
@@ -265,10 +326,12 @@ repo_path = "/abs/path/2"
 `[defaults]` keys: `poll_interval_seconds`, `recent_merges_limit`, `log_level`,
 `agent`, `agent_bin`, `agent_args`, `agent_auth`, `claude_bin`,
 `claude_extra_args`, `codex_bin`, `codex_extra_args`, `token_env`,
-`cache_root`, `pr_authors`. `[harnesses.<name>]` tables may define custom
-`bin` and `args` values. `log_level` and `cache_root` are process-wide;
-everything else can be overridden per-repo (`pr_authors` replaces, rather
-than merges with, the default list).
+`cache_root`, `pr_authors`, `manage_label`, `manage_all_prs`.
+`[harnesses.<name>]` tables may define custom `bin` and `args` values.
+`log_level` and `cache_root` are process-wide; everything else can be
+overridden per-repo (`pr_authors` replaces, rather than merges with, the
+default list). See [Which PRs get managed](#which-prs-get-managed) for
+`manage_label` / `manage_all_prs`.
 
 `[[repos]]` requires `github_repo` (`owner/name`) and `repo_path` (absolute
 path to a local checkout). Any `[defaults]` key except `log_level` and

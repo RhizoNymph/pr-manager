@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::types::{
-    AgentConfig, AuthMode, Config, ConfigError, Globals, LogLevel, RepoConfig, RepoId,
+    AgentConfig, AuthMode, Config, ConfigError, Globals, LogLevel, ManageLabel, ManagedScope,
+    RepoConfig, RepoId,
 };
 
 const DEFAULT_TOKEN_ENV: &str = "GITHUB_TOKEN";
@@ -115,6 +116,10 @@ struct TomlDefaults {
     cache_root: Option<String>,
     /// Default PR-author allowlist. See `pr_authors` on TomlRepo.
     pr_authors: Option<Vec<String>>,
+    /// Default for `manage_all_prs`. See TomlRepo.
+    manage_all_prs: Option<bool>,
+    /// Default for `manage_label`. See TomlRepo.
+    manage_label: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -136,9 +141,15 @@ struct TomlRepo {
     codex_extra_args: Option<TomlArgs>,
     /// Allowlist of PR author logins. When set and non-empty, pr-manager only
     /// processes PRs whose author appears here (case-insensitive). Unset or
-    /// empty means "no filter" — every open auto-merge PR is handled. Per-repo
-    /// value replaces (not merges with) the default.
+    /// empty means "no filter" — every managed PR is handled. Per-repo value
+    /// replaces (not merges with) the default.
     pr_authors: Option<Vec<String>>,
+    /// Opt every open PR in this repo into management, auto-merge or not.
+    /// Overrides `manage_label` when true.
+    manage_all_prs: Option<bool>,
+    /// Name of a GitHub label that opts an individual non-auto-merge PR into
+    /// management. Ignored when `manage_all_prs` is true.
+    manage_label: Option<String>,
 }
 
 // --- Loader ------------------------------------------------------------------
@@ -304,6 +315,18 @@ fn load_toml(path: &Path) -> Result<Config, ConfigError> {
             &mut issues,
         );
 
+        let managed_scope = resolve_managed_scope(
+            ManagedScopeInputs {
+                manage_all_prs: raw_repo.manage_all_prs.or(parsed.defaults.manage_all_prs),
+                manage_label: raw_repo
+                    .manage_label
+                    .as_deref()
+                    .or(parsed.defaults.manage_label.as_deref()),
+            },
+            &issue_prefix,
+            &mut issues,
+        );
+
         repos.push(RepoConfig {
             repo_id,
             github_repo: raw_repo.github_repo.clone(),
@@ -318,6 +341,7 @@ fn load_toml(path: &Path) -> Result<Config, ConfigError> {
             agent,
             auth_mode,
             pr_authors,
+            managed_scope,
         });
     }
 
@@ -382,6 +406,40 @@ fn resolve_pr_authors(
         out.push(trimmed.to_ascii_lowercase());
     }
     out
+}
+
+/// Per-repo values for the management scope, already merged with `[defaults]`.
+struct ManagedScopeInputs<'a> {
+    manage_all_prs: Option<bool>,
+    manage_label: Option<&'a str>,
+}
+
+/// Collapses the two opt-in knobs into one resolved [`ManagedScope`].
+///
+/// `manage_all_prs = true` is an override: it wins over any `manage_label`,
+/// which is why the resolved type carries only one of them. A repo that sets
+/// `manage_all_prs = false` explicitly still overrides a `[defaults]` value of
+/// true, and falls back to label matching if a label is configured.
+fn resolve_managed_scope(
+    inputs: ManagedScopeInputs<'_>,
+    prefix: &str,
+    issues: &mut Vec<String>,
+) -> ManagedScope {
+    if inputs.manage_all_prs.unwrap_or(false) {
+        return ManagedScope::AllOpen;
+    }
+    match inputs.manage_label {
+        None => ManagedScope::AutoMergeOnly,
+        Some(raw) => match ManageLabel::new(raw) {
+            Some(label) => ManagedScope::AutoMergeOrLabel(label),
+            None => {
+                issues.push(format!(
+                    "{prefix} manage_label must not be empty; remove the key to manage only auto-merge PRs"
+                ));
+                ManagedScope::AutoMergeOnly
+            }
+        },
+    }
 }
 
 fn parse_auth_mode(value: Option<&str>, prefix: &str, issues: &mut Vec<String>) -> AuthMode {
@@ -655,6 +713,68 @@ mod tests {
                 .map(str::to_string)
                 .collect::<Vec<_>>()
         );
+    }
+
+    fn scope(
+        manage_all_prs: Option<bool>,
+        manage_label: Option<&str>,
+    ) -> (ManagedScope, Vec<String>) {
+        let mut issues = Vec::new();
+        let resolved = resolve_managed_scope(
+            ManagedScopeInputs {
+                manage_all_prs,
+                manage_label,
+            },
+            "repos[0] (acme/widgets):",
+            &mut issues,
+        );
+        (resolved, issues)
+    }
+
+    #[test]
+    fn scope_defaults_to_auto_merge_only() {
+        let (resolved, issues) = scope(None, None);
+        assert_eq!(resolved, ManagedScope::AutoMergeOnly);
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn manage_all_prs_resolves_to_all_open() {
+        let (resolved, issues) = scope(Some(true), None);
+        assert_eq!(resolved, ManagedScope::AllOpen);
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn manage_all_prs_overrides_manage_label() {
+        let (resolved, issues) = scope(Some(true), Some("pr-manager"));
+        assert_eq!(resolved, ManagedScope::AllOpen);
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn manage_label_applies_when_flag_is_unset_or_false() {
+        let expected =
+            ManagedScope::AutoMergeOrLabel(ManageLabel::new("pr-manager").expect("non-empty"));
+        assert_eq!(scope(None, Some("pr-manager")).0, expected);
+        assert_eq!(scope(Some(false), Some("pr-manager")).0, expected);
+    }
+
+    #[test]
+    fn empty_manage_label_is_a_config_error() {
+        let (resolved, issues) = scope(None, Some("   "));
+        assert_eq!(resolved, ManagedScope::AutoMergeOnly);
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].contains("manage_label must not be empty"));
+    }
+
+    #[test]
+    fn manage_label_is_trimmed() {
+        let (resolved, _) = scope(None, Some("  pr-manager  "));
+        match resolved {
+            ManagedScope::AutoMergeOrLabel(label) => assert_eq!(label.as_str(), "pr-manager"),
+            other => panic!("expected label scope, got {other:?}"),
+        }
     }
 
     #[test]

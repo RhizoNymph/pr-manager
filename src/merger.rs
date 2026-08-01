@@ -20,7 +20,7 @@ use std::process::{Output, Stdio};
 use thiserror::Error;
 use tokio::process::Command;
 
-use crate::types::{OpenAutoMergePr, RepoConfig};
+use crate::types::{OpenPr, RepoConfig};
 
 #[derive(Debug)]
 pub enum MergeOutcome {
@@ -118,7 +118,7 @@ enum SetupError {
     Io(String),
 }
 
-pub async fn try_native_merge(repo: &RepoConfig, pr: &OpenAutoMergePr) -> MergeOutcome {
+pub async fn try_native_merge(repo: &RepoConfig, pr: &OpenPr) -> MergeOutcome {
     let wt = repo.worktree_base.join(format!("pr-{}", pr.number));
 
     if let Err(e) = validate_worktree_path(&repo.worktree_base, &wt) {

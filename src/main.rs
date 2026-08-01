@@ -90,6 +90,7 @@ fn log_repo_startup(repo: &RepoConfig) {
         agent_bin = %repo.agent.bin,
         agent_args = %repo.agent.args.join(" "),
         agent_auth = repo.auth_mode.as_str(),
+        managed_scope = %repo.managed_scope.describe(),
         "watching repo"
     );
 }

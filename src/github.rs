@@ -6,7 +6,7 @@ use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use tokio::sync::RwLock;
 
-use crate::types::{GitHubError, OpenAutoMergePr, RecentMerge, RepoConfig};
+use crate::types::{GitHubError, OpenPr, RecentMerge, RepoConfig};
 
 const PULLS_PER_PAGE: u32 = 100;
 
@@ -46,6 +46,11 @@ struct PrUser {
 }
 
 #[derive(Debug, Deserialize)]
+struct PrLabel {
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct PrListItem {
     number: i64,
     title: String,
@@ -55,6 +60,8 @@ struct PrListItem {
     merged_at: Option<String>,
     #[serde(default)]
     user: Option<PrUser>,
+    #[serde(default)]
+    labels: Vec<PrLabel>,
     head: PrHead,
     base: PrBase,
 }
@@ -147,7 +154,12 @@ impl GitHubClient {
         Ok((parsed.sha, branch))
     }
 
-    pub async fn list_open_auto_merge_prs(&self) -> Result<Vec<OpenAutoMergePr>, GitHubError> {
+    /// Every open PR in the repo, unfiltered. Deciding which of these are
+    /// under management is the poller's job (`ManagedScope::admits`), because
+    /// the answer depends on per-repo config rather than on the API response.
+    /// Fork PRs (no `head.repo`) are still dropped here: pr-manager cannot
+    /// push to them at all.
+    pub async fn list_open_prs(&self) -> Result<Vec<OpenPr>, GitHubError> {
         let mut out = Vec::new();
         let mut page = 1;
 
@@ -164,14 +176,11 @@ impl GitHubClient {
             let is_last_page = items.len() < PULLS_PER_PAGE as usize;
 
             for p in items {
-                if p.auto_merge.is_none() {
-                    continue;
-                }
                 let head_repo = match p.head.repo {
                     Some(r) => r,
                     None => continue,
                 };
-                out.push(OpenAutoMergePr {
+                out.push(OpenPr {
                     number: p.number,
                     title: p.title,
                     body: p.body.unwrap_or_default(),
@@ -181,6 +190,8 @@ impl GitHubClient {
                     base_repo_id: p.base.repo.id,
                     base_branch: p.base.ref_,
                     author_login: p.user.map(|u| u.login),
+                    auto_merge_enabled: p.auto_merge.is_some(),
+                    labels: p.labels.into_iter().map(|l| l.name).collect(),
                 });
             }
 

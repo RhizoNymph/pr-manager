@@ -5,8 +5,9 @@
 - Watches one or more GitHub repos. Each repo is polled by its own tokio
   task with its own `last_main_sha` and seen-set; tasks share a single
   `AgentRunner` whose registry is keyed on `(RepoId, pr_number)`.
-- Per repo, polls for: (a) default-branch HEAD SHA, (b) open PRs with
-  `auto_merge != null`, (c) recently merged PRs for prompt context.
+- Per repo, polls for: (a) default-branch HEAD SHA, (b) all open PRs,
+  narrowed to the repo's **managed set** (see "Management scope"),
+  (c) recently merged PRs for prompt context.
 - Per `(PR, new main SHA)` pair, runs a **native fast-path** in-process
   (clean `git merge`, lockfile-only conflict resolution by re-running the
   matching package manager) and pushes when it can finish without an LLM.
@@ -19,7 +20,7 @@
 - Reconciles each repo's active sessions on every tick:
   - Sweep: drop entries whose tmux session is gone (global; cheap).
   - Force-close: PR's `head_sha` advanced past what we spawned against,
-    or PR is no longer in the open auto-merge list (scoped to this repo's
+    or PR is no longer in the managed set (scoped to this repo's
     sessions only).
 - The prompt instructs the agent to merge `origin/<main>` into the PR
   branch inside a dedicated throwaway worktree, push when clean or when
@@ -57,6 +58,55 @@ github_repo = "owner/name"
 repo_path = "/abs/path/to/checkout"
 ```
 
+## Management scope
+
+"Managed" = pr-manager will merge the default branch into that PR's head
+branch when main advances, and may spend an agent run on it. Two per-repo
+keys (also settable in `[defaults]`) decide the set:
+
+| `manage_all_prs` | `manage_label` | Resolved `ManagedScope` | Managed set |
+| ---------------- | -------------- | ----------------------- | ----------- |
+| unset / `false`  | unset          | `AutoMergeOnly`         | `auto_merge != null` |
+| unset / `false`  | `"pr-manager"` | `AutoMergeOrLabel(..)`  | `auto_merge != null` **or** labeled |
+| `true`           | *(any)*        | `AllOpen`               | every open PR |
+
+`manage_all_prs = true` is an override: it wins over `manage_label`, which
+is why the resolved enum carries only one of the two — "manage everything
+*and* match a label" is not representable past config load. A repo setting
+`manage_all_prs = false` explicitly overrides a `[defaults]` value of `true`
+and falls back to label matching if a label is configured.
+
+Validation: an empty or whitespace-only `manage_label` is a config error
+(`ManageLabel::new` rejects it), not a silently-ignored key. Label matching
+is ASCII case-insensitive, matching the `pr_authors` rule.
+
+`ManagedScope::admits(&OpenPr) -> Option<ManagedReason>` is the single
+decision point. `ManagedReason` is one of:
+
+| Reason | Meaning |
+| ------ | ------- |
+| `auto_merge` | GitHub auto-merge is armed on the PR. Reported under every scope. |
+| `opt_in_label` | Non-auto-merge PR carrying the repo's `manage_label`. |
+| `repo_opt_in` | Non-auto-merge PR swept in by `manage_all_prs`. |
+
+The reason rides along into every merge/spawn log line as `managed_reason`
+and into the prompt as `managed_because`. The repo's scope appears once at
+startup as `managed_scope` and again on the "main advanced" line as `scope`.
+
+Ordering: `pr_authors` is applied **before** the scope filter, so the
+allowlist always wins — a labeled PR from an author outside the allowlist is
+never managed. Fork filtering is unchanged and independent (a fork PR is
+skipped in the spawn loop regardless of scope).
+
+Opting in is fully reversible from the GitHub UI: removing the label (or
+disarming auto-merge) drops the PR from the managed set on the next tick,
+and reconcile force-closes any agent session already running for it.
+
+Opted-in PRs get the identical pipeline to auto-merge PRs, including agent
+escalation on semantic conflicts. `manage_all_prs = true` on a busy repo can
+therefore mean many concurrent tmux sessions; `pr_authors` is the intended
+way to scope that down.
+
 ## Data and control flow
 
 ```text
@@ -72,7 +122,9 @@ user's terminal
         │     └─ start_pollers(repos, clients, runner) -> PollerSet
         │           one tokio task per repo, each on its own tick:
         │             1. fetch main SHA (this repo)
-        │             2. list open auto-merge PRs (this repo)
+        │             2. list open PRs (this repo)
+        │                  filter_by_authors  -> pr_authors allowlist
+        │                  filter_managed     -> managed_scope.admits(pr)
         │             3. runner.sweep()                <- drops ended sessions globally
         │             4. for each runner.active_for_repo(repo_id):
         │                  if PR gone or head_sha advanced:
@@ -95,23 +147,27 @@ user's terminal
 
 Per-repo poller loop (every `poll_interval_seconds`, default 60s):
 1. `GET /repos/{repo}/commits/{default_branch}` -> `mainSha`.
-2. `GET /repos/{repo}/pulls?state=open` -> filter `auto_merge != null`.
-   If `repo.pr_authors` is non-empty, drop PRs whose `user.login` is not in
-   the allowlist (case-insensitive). Unknown author (missing `user`) is
-   dropped when the allowlist is active. Empty/unset allowlist = no filter.
+2. `GET /repos/{repo}/pulls?state=open` -> every open PR, minus forks
+   (`head.repo` absent). Then two filters, in this order:
+   - **Authors.** If `repo.pr_authors` is non-empty, drop PRs whose
+     `user.login` is not in the allowlist (case-insensitive). Unknown author
+     (missing `user`) is dropped when the allowlist is active. Empty/unset
+     allowlist = no filter.
+   - **Scope.** `repo.managed_scope.admits(pr)` keeps the PR and tags it with
+     a `ManagedReason`; `None` drops it. See "Management scope".
 3. Reconcile sessions:
    - `runner.sweep()` removes registry entries (across all repos) whose
      tmux session no longer exists.
    - For each `runner.active_for_repo(repo_id)` session, close it if the
-     PR left the open auto-merge list or its current `head.sha` differs
+     PR left the managed set or its current `head.sha` differs
      from the one we spawned against.
 4. If `mainSha === lastMainSha`, done.
 5. Else: `GET /repos/{repo}/pulls?state=closed&sort=updated&direction=desc`
    -> take first N where `merged_at != null`.
-6. If at least one open auto-merge PR exists, run `git fetch origin --prune`
+6. If at least one managed PR exists, run `git fetch origin --prune`
    in the repo's `repo_path` once. On failure, log and skip the spawn loop
    without advancing `lastMainSha` so the next tick retries.
-7. For each open auto-merge PR, key = `${pr.number}:${pr.head.sha}:${mainSha}`.
+7. For each managed PR, key = `${pr.number}:${pr.head.sha}:${mainSha}`.
    If key already in this repo's `seen` set, skip. Else call `try_native_merge`:
    - `Pushed` / `PushedAfterLockfile` -> add key to `seen`, no agent spawn.
    - `NeedsAgent` with a prepared worktree -> emit, add key to `seen`, spawn
@@ -312,9 +368,10 @@ of truth. Two distinct close paths:
   gone, removes the registry entry, deletes the prompt tempfile, and removes
   the worktree.
 - **Force-close.** The repo's poller observes that the PR's `head.sha` has
-  advanced past `spawnHeadSha`, or the PR has left the open auto-merge list.
-  The runner kills the tmux session, deletes the prompt tempfile, and removes
-  the worktree.
+  advanced past `spawnHeadSha`, or the PR has left the managed set — closed,
+  auto-merge disarmed, opt-in label removed, or `manage_all_prs` turned off
+  and the process restarted. The runner kills the tmux session, deletes the
+  prompt tempfile, and removes the worktree.
 
 Either way, the prompt tempfile and per-PR worktree are cleaned up.
 
@@ -328,14 +385,21 @@ Either way, the prompt tempfile and per-PR worktree are cleaned up.
   parses + validates it, and returns a typed `Config { globals,
   repos: Vec<RepoConfig> }`. Returns `ConfigError` on missing/invalid
   input. Tokens always read from env (default `GITHUB_TOKEN`, or
-  whatever `token_env` names).
+  whatever `token_env` names). `resolve_managed_scope` collapses
+  `manage_all_prs` + `manage_label` into one `ManagedScope`.
 - `src/types.rs` - `RepoId`, `Globals`, `Config`, `RepoConfig`,
-  `AgentConfig`, `PrEvent`, `RecentMerge`, error types.
+  `AgentConfig`, `OpenPr`, `PrEvent`, `RecentMerge`, `ManageLabel`,
+  `ManagedScope` (+ `admits` / `describe`), `ManagedReason`, error types.
 - `src/github.rs` - `GitHubClient` wrapping reqwest; one per repo.
+  `list_open_prs` returns every open non-fork PR with `auto_merge_enabled`
+  and `labels` populated; it applies no management filtering of its own.
 - `src/poller.rs` - `start_pollers` spawns one task per repo and returns
-  a `PollerSet` whose `cancel()` notifies them all and joins.
+  a `PollerSet` whose `cancel()` notifies them all and joins. Owns
+  `filter_by_authors` and `filter_managed`, and the internal `ManagedPr`
+  (an `OpenPr` plus the `ManagedReason` that admitted it).
 - `src/prompt.rs` - `build_prompt(repo, event)` returns the per-event
-  prompt with metadata substituted inline.
+  prompt with metadata substituted inline; the opening objective and the
+  `managed_because` line vary with `event.managed_reason`.
 - `src/agent.rs` - `AgentRunner` exposes `spawn / active_for_repo /
   close / sweep / shutdown`. Owns the global session registry keyed on
   `(RepoId, pr_number)`.
@@ -392,6 +456,15 @@ cross-process collisions, run one pr-manager per host per repo.
   user's configured `repo_path` is used as the stable Git control checkout for
   fetches and worktree operations, but it is never the target of merge work.
 - Fork PRs are filtered at the poller.
+- Management scope is resolved once at config load, never per tick, so a
+  repo's `ManagedScope` is constant for the process lifetime. Changing
+  `manage_label` / `manage_all_prs` requires a restart; changing a PR's
+  label or auto-merge state does not.
+- `pr_authors` is applied before `managed_scope`, so widening the scope can
+  never pull in a PR the author allowlist excludes.
+- A PR admitted by any reason gets the identical downstream pipeline. There
+  is no separate, cheaper path for opted-in PRs — `ManagedReason` affects
+  logging and prompt wording only.
 - Prompt tempfiles live in `os.tmpdir()` with mode 0600 and are removed
   on close/sweep/shutdown.
 - Agent log files under `<cache>/pr-manager/<owner>__<name>/logs/` are
