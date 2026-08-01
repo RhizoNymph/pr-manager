@@ -10,9 +10,17 @@ use crate::git::fetch_origin_prune;
 use crate::github::GitHubClient;
 use crate::merger::{try_native_merge, MergeOutcome, NeedsAgentReason};
 use crate::prompt::build_prompt;
-use crate::types::{GitHubError, OpenAutoMergePr, PrEvent, RepoConfig};
+use crate::types::{GitHubError, ManagedReason, OpenPr, PrEvent, RepoConfig};
 
 const SEEN_CAP: usize = 200;
+
+/// An open PR that this repo's `managed_scope` admits, paired with the reason
+/// it qualified. Everything downstream of the filter works on these.
+#[derive(Debug, Clone)]
+struct ManagedPr {
+    pr: OpenPr,
+    reason: ManagedReason,
+}
 
 /// One independent polling loop per watched repo. They share the AgentRunner
 /// (registry is keyed by repo+pr) and a single cancel Notify.
@@ -117,19 +125,20 @@ async fn tick(
 
     // Always list open PRs — we need them both for new-event emission AND
     // for reconciling the active session registry against current state.
-    let prs = match github.list_open_auto_merge_prs().await {
+    let prs = match github.list_open_prs().await {
         Ok(v) => v,
         Err(err) => {
-            log_warn(repo, &err, "failed to list open auto-merge PRs");
+            log_warn(repo, &err, "failed to list open PRs");
             return Ok(());
         }
     };
 
     let prs = filter_by_authors(repo, prs);
+    let prs = filter_managed(repo, prs);
 
-    let mut by_number: HashMap<i64, OpenAutoMergePr> = HashMap::new();
-    for pr in &prs {
-        by_number.insert(pr.number, pr.clone());
+    let mut by_number: HashMap<i64, ManagedPr> = HashMap::new();
+    for managed in &prs {
+        by_number.insert(managed.pr.number, managed.clone());
     }
 
     reconcile_sessions(repo, runner, &by_number).await;
@@ -156,7 +165,9 @@ async fn tick(
         from = %prev,
         to = %main_sha,
         main_branch = %main_branch,
-        "main advanced; checking auto-merge PRs"
+        managed_prs = prs.len() as u64,
+        scope = %repo.managed_scope.describe(),
+        "main advanced; checking managed PRs"
     );
 
     let recent = if !prs.is_empty() {
@@ -187,7 +198,8 @@ async fn tick(
         }
     }
 
-    for pr in &prs {
+    for managed in &prs {
+        let pr = &managed.pr;
         if pr.head_repo_id != pr.base_repo_id {
             tracing::info!(repo = %repo.github_repo, pr = pr.number, "skipped fork PR (out of scope for v1)");
             continue;
@@ -210,6 +222,7 @@ async fn tick(
                     pr = pr.number,
                     head_sha = %pr.head_sha,
                     main_sha = %main_sha,
+                    managed_reason = managed.reason.as_str(),
                     "merged and pushed natively (no conflicts)"
                 );
                 continue;
@@ -222,6 +235,7 @@ async fn tick(
                     head_sha = %pr.head_sha,
                     main_sha = %main_sha,
                     lockfiles = %lockfiles.join(","),
+                    managed_reason = managed.reason.as_str(),
                     "merged and pushed natively (lockfile-only conflicts)"
                 );
                 continue;
@@ -249,6 +263,7 @@ async fn tick(
             pr: pr.clone(),
             main_sha: main_sha.clone(),
             recent: recent.clone(),
+            managed_reason: managed.reason,
         };
         let prompt = build_prompt(repo, &event);
 
@@ -260,6 +275,7 @@ async fn tick(
                     pr = pr.number,
                     head_sha = %pr.head_sha,
                     main_sha = %main_sha,
+                    managed_reason = managed.reason.as_str(),
                     "emitted event"
                 );
             }
@@ -276,7 +292,7 @@ async fn tick(
 async fn reconcile_sessions(
     repo: &RepoConfig,
     runner: &AgentRunner,
-    by_number: &HashMap<i64, OpenAutoMergePr>,
+    by_number: &HashMap<i64, ManagedPr>,
 ) {
     // 1. Drop entries for sessions whose tmux session is gone (agent exited
     //    on its own — typically a successful push). Sweep is global so each
@@ -284,7 +300,8 @@ async fn reconcile_sessions(
     runner.sweep().await;
 
     // 2. Force-close sessions whose target PR has moved on. Two signals:
-    //    - PR no longer in the open auto-merge list.
+    //    - PR no longer in the managed list (closed, or it lost auto-merge /
+    //      had its opt-in label removed).
     //    - PR head_sha advanced past the SHA we spawned against.
     for sess in runner.active_for_repo(&repo.repo_id).await {
         let current = by_number.get(&sess.pr_number);
@@ -294,13 +311,13 @@ async fn reconcile_sessions(
                     .close(
                         &repo.repo_id,
                         sess.pr_number,
-                        "pr no longer open with auto-merge",
+                        "pr no longer open and managed",
                     )
                     .await;
             }
-            Some(current) if current.head_sha != sess.spawn_head_sha => {
+            Some(current) if current.pr.head_sha != sess.spawn_head_sha => {
                 let from = sess.spawn_head_sha.chars().take(7).collect::<String>();
-                let to = current.head_sha.chars().take(7).collect::<String>();
+                let to = current.pr.head_sha.chars().take(7).collect::<String>();
                 let reason = format!("head_sha advanced {from} → {to}");
                 runner.close(&repo.repo_id, sess.pr_number, &reason).await;
             }
@@ -322,7 +339,28 @@ fn remember(queue: &mut VecDeque<String>, set: &mut HashSet<String>, key: String
     }
 }
 
-fn filter_by_authors(repo: &RepoConfig, prs: Vec<OpenAutoMergePr>) -> Vec<OpenAutoMergePr> {
+/// Keeps only the PRs this repo's `managed_scope` admits, tagging each with
+/// the reason it qualified. Runs after the author allowlist, so a PR another
+/// operator owns never shows up here regardless of scope.
+fn filter_managed(repo: &RepoConfig, prs: Vec<OpenPr>) -> Vec<ManagedPr> {
+    let mut kept = Vec::with_capacity(prs.len());
+    for pr in prs {
+        match repo.managed_scope.admits(&pr) {
+            Some(reason) => kept.push(ManagedPr { pr, reason }),
+            None => {
+                tracing::debug!(
+                    repo = %repo.github_repo,
+                    pr = pr.number,
+                    scope = %repo.managed_scope.describe(),
+                    "skipping pr: not under management"
+                );
+            }
+        }
+    }
+    kept
+}
+
+fn filter_by_authors(repo: &RepoConfig, prs: Vec<OpenPr>) -> Vec<OpenPr> {
     if repo.pr_authors.is_empty() {
         return prs;
     }
@@ -395,10 +433,18 @@ fn log_warn(repo: &RepoConfig, err: &GitHubError, msg: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{AgentConfig, AuthMode, RepoId};
+    use crate::types::{AgentConfig, AuthMode, ManageLabel, ManagedScope, RepoId};
     use std::path::PathBuf;
 
     fn repo_with_authors(authors: Vec<&str>) -> RepoConfig {
+        repo_with(authors, ManagedScope::AutoMergeOnly)
+    }
+
+    fn repo_with_scope(scope: ManagedScope) -> RepoConfig {
+        repo_with(vec![], scope)
+    }
+
+    fn repo_with(authors: Vec<&str>, managed_scope: ManagedScope) -> RepoConfig {
         RepoConfig {
             repo_id: RepoId::new("acme", "widgets"),
             github_repo: "acme/widgets".into(),
@@ -420,11 +466,12 @@ mod tests {
                 .into_iter()
                 .map(|s| s.to_ascii_lowercase())
                 .collect(),
+            managed_scope,
         }
     }
 
-    fn pr_with_author(number: i64, author: Option<&str>) -> OpenAutoMergePr {
-        OpenAutoMergePr {
+    fn pr_with_author(number: i64, author: Option<&str>) -> OpenPr {
+        OpenPr {
             number,
             title: format!("PR #{number}"),
             body: String::new(),
@@ -434,7 +481,24 @@ mod tests {
             base_repo_id: 1,
             base_branch: "main".into(),
             author_login: author.map(str::to_string),
+            auto_merge_enabled: true,
+            labels: Vec::new(),
         }
+    }
+
+    fn pr_with(number: i64, auto_merge_enabled: bool, labels: &[&str]) -> OpenPr {
+        OpenPr {
+            auto_merge_enabled,
+            labels: labels.iter().map(|s| s.to_string()).collect(),
+            ..pr_with_author(number, Some("alice"))
+        }
+    }
+
+    fn managed_numbers(repo: &RepoConfig, prs: Vec<OpenPr>) -> Vec<(i64, ManagedReason)> {
+        filter_managed(repo, prs)
+            .into_iter()
+            .map(|m| (m.pr.number, m.reason))
+            .collect()
     }
 
     #[test]
@@ -461,5 +525,85 @@ mod tests {
         let kept = filter_by_authors(&repo, prs);
         let kept_nums: Vec<i64> = kept.iter().map(|p| p.number).collect();
         assert_eq!(kept_nums, vec![1, 3]);
+    }
+
+    #[test]
+    fn default_scope_keeps_only_auto_merge_prs() {
+        let repo = repo_with_scope(ManagedScope::AutoMergeOnly);
+        let prs = vec![
+            pr_with(1, true, &[]),
+            pr_with(2, false, &[]),
+            pr_with(3, false, &["pr-manager"]),
+        ];
+        assert_eq!(
+            managed_numbers(&repo, prs),
+            vec![(1, ManagedReason::AutoMerge)]
+        );
+    }
+
+    #[test]
+    fn label_scope_adds_opted_in_prs_alongside_auto_merge() {
+        let repo = repo_with_scope(ManagedScope::AutoMergeOrLabel(
+            ManageLabel::new("pr-manager").expect("non-empty"),
+        ));
+        let prs = vec![
+            pr_with(1, true, &[]),
+            pr_with(2, false, &["wip"]),
+            pr_with(3, false, &["PR-Manager", "wip"]),
+        ];
+        assert_eq!(
+            managed_numbers(&repo, prs),
+            vec![
+                (1, ManagedReason::AutoMerge),
+                (3, ManagedReason::OptInLabel)
+            ]
+        );
+    }
+
+    #[test]
+    fn all_open_scope_keeps_every_pr() {
+        let repo = repo_with_scope(ManagedScope::AllOpen);
+        let prs = vec![pr_with(1, true, &[]), pr_with(2, false, &[])];
+        assert_eq!(
+            managed_numbers(&repo, prs),
+            vec![(1, ManagedReason::AutoMerge), (2, ManagedReason::RepoOptIn)]
+        );
+    }
+
+    #[test]
+    fn author_allowlist_still_wins_over_an_opt_in_label() {
+        // A labeled PR from someone else's account must stay untouched: the
+        // author filter runs first, so scope never sees it.
+        let repo = repo_with(
+            vec!["alice"],
+            ManagedScope::AutoMergeOrLabel(ManageLabel::new("pr-manager").expect("non-empty")),
+        );
+        let bob_pr = OpenPr {
+            author_login: Some("bob".into()),
+            ..pr_with(2, false, &["pr-manager"])
+        };
+        let prs = vec![pr_with(1, false, &["pr-manager"]), bob_pr];
+
+        let after_authors = filter_by_authors(&repo, prs);
+        assert_eq!(
+            managed_numbers(&repo, after_authors),
+            vec![(1, ManagedReason::OptInLabel)]
+        );
+    }
+
+    #[test]
+    fn author_allowlist_still_wins_over_manage_all_prs() {
+        let repo = repo_with(vec!["alice"], ManagedScope::AllOpen);
+        let bob_pr = OpenPr {
+            author_login: Some("bob".into()),
+            ..pr_with(2, false, &[])
+        };
+        let prs = vec![pr_with(1, false, &[]), bob_pr];
+
+        let after_authors = filter_by_authors(&repo, prs);
+        assert_eq!(
+            managed_numbers(&repo, after_authors),
+            vec![(1, ManagedReason::RepoOptIn)]
+        );
     }
 }

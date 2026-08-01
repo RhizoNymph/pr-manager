@@ -24,8 +24,21 @@ claude_extra_args = "--permission-mode bypassPermissions"
 # pr_authors = ["alice", "renovate[bot]"]
 #   Restrict pr-manager to PRs from these author logins (case-insensitive).
 #   Lets two operators run pr-manager against the same repo without stepping
-#   on each other. Unset or [] = process every open auto-merge PR.
+#   on each other. Unset or [] = process every managed PR.
 #   Per-repo `pr_authors` replaces (not merges with) the default list.
+#
+# Which PRs are "managed" (i.e. get main merged into them). By default, only
+# open PRs with GitHub auto-merge armed. These two keys opt in the rest:
+#
+# manage_label = "pr-manager"
+#   Any open PR carrying this label is managed even without auto-merge.
+#   Matching is case-insensitive. Remove the label and the PR drops out on
+#   the next tick.
+# manage_all_prs = false
+#   true = manage every open PR in the repo, auto-merge or not. This is an
+#   override: when true, `manage_label` is ignored. Opted-in PRs get the same
+#   treatment as auto-merge ones, including an agent run on real conflicts,
+#   so on a busy repo pair this with `pr_authors`.
 
 # Custom harnesses can run any local command. Args may be a string or list.
 # pr-manager feeds the prompt on stdin, just like the built-in claude/codex
@@ -43,8 +56,11 @@ repo_path = "/home/me/code/acme/widgets"
 # agent = "codex"
 # poll_interval_seconds = 30
 # pr_authors = ["alice"]
+# manage_label = "pr-manager"
 
 [[repos]]
 github_repo = "acme/sprockets"
 repo_path = "/home/me/code/acme/sprockets"
 token_env = "GITHUB_TOKEN_SPROCKETS"
+# Manage every open PR in this repo, not just the auto-merge ones.
+# manage_all_prs = true

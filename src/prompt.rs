@@ -1,4 +1,4 @@
-use crate::types::{PrEvent, RepoConfig};
+use crate::types::{ManagedReason, PrEvent, RepoConfig};
 
 pub fn build_prompt(repo: &RepoConfig, event: &PrEvent) -> String {
     let pr = &event.pr;
@@ -20,9 +20,24 @@ pub fn build_prompt(repo: &RepoConfig, event: &PrEvent) -> String {
         body_trimmed
     };
 
+    // Why this PR is being touched at all. Auto-merge PRs are blocked waiting
+    // on the merge; opted-in ones are simply being kept current, so don't tell
+    // the agent auto-merge will take over when it won't.
+    let objective = match event.managed_reason {
+        ManagedReason::AutoMerge => {
+            "A pull request needs main merged into\n\
+its head branch so GitHub auto-merge can take over."
+        }
+        ManagedReason::OptInLabel | ManagedReason::RepoOptIn => {
+            "A pull request is opted in to pr-manager and\n\
+needs main merged into its head branch to stay current with the default\n\
+branch. Nothing will merge it for you afterwards; the branch just has to end\n\
+up up-to-date."
+        }
+    };
+
     let template = format!(
-        "You are pr-manager, an automated agent. A pull request needs main merged into\n\
-its head branch so GitHub auto-merge can take over. Perform the merge and\n\
+        "You are pr-manager, an automated agent. {objective} Perform the merge and\n\
 push the result, deferring to the user only when the conflict resolution is\n\
 not obvious.\n\
 \n\
@@ -48,6 +63,7 @@ Event metadata:\n\
   main_branch:   {base_branch}\n\
   main_sha:      {main_sha}\n\
   recent_merges: {recent_list}\n\
+  managed_because: {managed_reason}\n\
 \n\
 You are already running in the prepared repository directory for this PR.\n\
 pr-manager has already run `git fetch origin --prune` and attempted\n\
@@ -111,7 +127,96 @@ it is easy to scan in logs. Examples:\n\
         base_branch = pr.base_branch,
         main_sha = main_sha,
         recent_list = recent_list,
+        managed_reason = event.managed_reason.as_str(),
     );
 
     template
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{AgentConfig, AuthMode, ManagedScope, OpenPr, RecentMerge, RepoId};
+    use std::path::PathBuf;
+
+    fn repo() -> RepoConfig {
+        RepoConfig {
+            repo_id: RepoId::new("acme", "widgets"),
+            github_repo: "acme/widgets".into(),
+            github_owner: "acme".into(),
+            github_name: "widgets".into(),
+            github_token: "t".into(),
+            poll_interval_seconds: 60,
+            recent_merges_limit: 10,
+            worktree_base: PathBuf::from("/tmp/pr-manager/acme__widgets/wt"),
+            logs_base: PathBuf::from("/tmp/pr-manager/acme__widgets/logs"),
+            repo_path: PathBuf::from("/tmp/acme/widgets"),
+            agent: AgentConfig {
+                name: "claude".into(),
+                bin: "claude".into(),
+                args: vec!["-p".into()],
+            },
+            auth_mode: AuthMode::OAuth,
+            pr_authors: Vec::new(),
+            managed_scope: ManagedScope::AutoMergeOnly,
+        }
+    }
+
+    fn event(managed_reason: ManagedReason) -> PrEvent {
+        PrEvent {
+            pr: OpenPr {
+                number: 7,
+                title: "Add widget".into(),
+                body: "body".into(),
+                head_branch: "feature".into(),
+                head_sha: "deadbeef".into(),
+                head_repo_id: 1,
+                base_repo_id: 1,
+                base_branch: "main".into(),
+                author_login: Some("alice".into()),
+                auto_merge_enabled: managed_reason == ManagedReason::AutoMerge,
+                labels: Vec::new(),
+            },
+            main_sha: "cafebabe".into(),
+            recent: vec![RecentMerge {
+                number: 5,
+                title: "Earlier".into(),
+                merged_at: "2026-01-01T00:00:00Z".into(),
+            }],
+            managed_reason,
+        }
+    }
+
+    #[test]
+    fn auto_merge_prompt_mentions_auto_merge_taking_over() {
+        let prompt = build_prompt(&repo(), &event(ManagedReason::AutoMerge));
+        assert!(prompt.contains("so GitHub auto-merge can take over"));
+        assert!(prompt.contains("managed_because: auto_merge"));
+    }
+
+    #[test]
+    fn opted_in_prompt_does_not_promise_auto_merge() {
+        for reason in [ManagedReason::OptInLabel, ManagedReason::RepoOptIn] {
+            let prompt = build_prompt(&repo(), &event(reason));
+            assert!(
+                !prompt.contains("auto-merge can take over"),
+                "opted-in prompt must not claim auto-merge will finish the job"
+            );
+            assert!(prompt.contains("stay current with the default"));
+            assert!(prompt.contains(&format!("managed_because: {}", reason.as_str())));
+        }
+    }
+
+    #[test]
+    fn prompt_never_targets_the_base_branch_for_pushes() {
+        for reason in [
+            ManagedReason::AutoMerge,
+            ManagedReason::OptInLabel,
+            ManagedReason::RepoOptIn,
+        ] {
+            let prompt = build_prompt(&repo(), &event(reason));
+            assert!(prompt.contains("NEVER push to main"));
+            assert!(prompt.contains("git push origin \"HEAD:feature\""));
+        }
+    }
 }
